@@ -72,8 +72,13 @@ body { background: #e8e5df; color: #1a1a1a; font-family: 'Consolas', 'Monaco', '
   (try
     (let [raw (.getItem js/localStorage storage-key)]
       (when raw
-        (let [parsed (js->clj (js/JSON.parse raw) :keywordize-keys true)]
-          (reset! app (merge parsed {:cursor-pos 0 :help false})))
+        (let [parsed (.parse js/JSON raw)]
+          ;; Ensure required keys exist after parsing
+          (reset! app {:nodes (.-nodes parsed)
+                       :focused (or (.-focused parsed) "root")
+                       :mode (if (= (.-mode parsed) "insert") :insert :normal)
+                       :help (boolean (.-help parsed))
+                       :cursor-pos (or (.-cursor_pos parsed) (.-cursor-pos parsed) 0)}))
         true))
     (catch js/Error _ false)))
 
