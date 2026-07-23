@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Test</title>
+<script type="importmap">{ "imports": { "squint-cljs/": "https://unpkg.com/squint-cljs/" } }</script>
+</head><body><div id="app"></div>
+<script type="text/plain" id="squint-src">
+(ns test) (defn init! [] (set! (.-innerHTML (.getElementById js/document "app")) "<h1>Hello</h1>")) (init!)
+</script>
+<script type="module">
+import { compileString } from 'https://unpkg.com/squint-cljs/index.js';
+try {
+  const js = compileString(document.getElementById('squint-src').textContent, { core_module: 'squint-cljs/core.js' });
+  const blob = new Blob([js], { type: 'application/javascript' });
+  await import(URL.createObjectURL(blob));
+} catch(err) { document.getElementById('app').innerHTML = '<h1>Error: '+err.message+'</h1>'; }
+</script></body></html>

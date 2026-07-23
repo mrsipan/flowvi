@@ -1,0 +1,1333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>flowvi</title>
+<script type="importmap">
+  { "imports": { "squint-cljs/": "https://unpkg.com/squint-cljs/" } }
+</script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #e8e5df; color: #1a1a1a; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; height: 100vh; overflow: hidden; }
+#app { height: 100vh; }
+.vim-container { display: flex; height: 100vh; width: 100%; }
+.vim-left { flex: 0 0 60%; display: flex; flex-direction: column; border-right: 2px solid #333; }
+.vim-right { flex: 1; display: flex; flex-direction: column; }
+.vim-header { padding: 8px 12px; background: #2d2d2d; border-bottom: 1px solid #444; font-weight: bold; font-size: 14px; color: #888; }
+.vim-editor { flex: 1; padding: 12px; overflow-y: auto; font-size: 16px; line-height: 1.6; outline: none; white-space: pre; cursor: text; }
+.vim-line { min-height: 1.6em; }
+.vim-current-line { background: #2a2a2a; }
+.vim-cursor-block { display: inline; background: #d4d4d4; color: #1e1e1e; }
+.vim-cursor-line { display: inline; background: transparent; color: #d4d4d4; font-weight: bold; animation: blink 1s step-end infinite; }
+.vim-visual-block { background: #569cd6; color: #ffffff; }
+@keyframes blink { 50% { opacity: 0; } }
+.vim-statusbar { padding: 6px 12px; background: #2d2d2d; border-top: 1px solid #444; font-size: 13px; color: #aaa; }
+.vim-mode-normal { font-weight: bold; color: #569cd6; }
+.vim-mode-insert { font-weight: bold; color: #4ec9b0; }
+.vim-mode-command { font-weight: bold; color: #ce9178; }
+.vim-mode-visual { font-weight: bold; color: #c586c0; }
+.vim-msg { color: #ce9178; font-style: italic; }
+.org-preview { flex: 1; padding: 12px; overflow-y: auto; font-size: 15px; line-height: 1.6; }
+.org-preview h1, .org-preview h2, .org-preview h3, .org-preview h4 { color: #569cd6; margin: 12px 0 6px; }
+.org-preview h1 { font-size: 1.4em; }
+.org-preview h2 { font-size: 1.2em; }
+.org-preview h3 { font-size: 1.1em; }
+.org-preview p { margin: 6px 0; }
+.org-preview ul { margin: 6px 0 6px 20px; }
+.org-preview li { margin: 3px 0; }
+.org-preview em { color: #ce9178; }
+.org-preview strong { color: #dcdcaa; }
+.org-preview code { background: #2d2d2d; padding: 1px 4px; border-radius: 3px; color: #ce9178; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<script type="text/plain" id="squint-src">
+;; ──────────────────────────────────────────────
+;; Vimflowy — Tree Outliner with Vim Keybindings
+;; ──────────────────────────────────────────────
+
+;; ── Utils ──
+(defn gen-id [] (str "n" (random-uuid)))
+
+;; ── Global State ──
+(defonce app (atom nil))
+
+(defn nodes [] (:nodes @app))
+(defn focused [] (:focused @app))
+(defn mode [] (:mode @app))
+(defn help? [] (:help @app))
+
+;; ── Persistence ──
+(def storage-key "vimflowy-data-v2")
+
+(defn save-local []
+  (try
+    (.setItem js/localStorage storage-key (js/JSON.stringify (clj->js @app)))
+    (catch js/Error _ nil)))
+
+(defn load-local []
+  (try
+    (let [raw (.getItem js/localStorage storage-key)]
+      (when raw
+        (let [parsed (js->clj (js/JSON.parse raw) :keywordize-keys true)]
+          (reset! app (merge parsed {:cursor-pos 0 :help false})))
+        true))
+    (catch js/Error _ false)))
+
+;; ── Tree Operations ──
+(defn node-at [id] (get (nodes) id))
+(defn parent-of [id] (:parent (node-at id)))
+(defn children-of [id] (:children (node-at id)))
+(defn depth [id]
+  (loop [n id d 0]
+    (let [p (parent-of n)]
+      (if (or (nil? p) (= p "root")) d (recur p (inc d))))))
+
+(defn flat-visible []
+  (let [nds (nodes)]
+    (loop [stack (list (get nds "root"))
+           result []]
+      (if (empty? stack)
+        result
+        (let [node (first stack)
+              remaining (rest stack)]
+          (if (:collapsed node)
+            (recur remaining (conj result (:id node)))
+            (recur (into (mapv (fn [id] (get nds id)) (reverse (:children node))) remaining)
+                   (conj result (:id node)))))))))
+
+(defn index-of [id]
+  (let [vs (flat-visible)]
+    (first (keep-indexed (fn [i v] (when (= v id) i)) vs))))
+
+(defn node-at-index [idx]
+  (let [vs (flat-visible)]
+    (when (and (>= idx 0) (< idx (count vs)))
+      (nth vs idx))))
+
+(defn sibling-index [id]
+  (let [p (parent-of id)]
+    (when p
+      (let [sibs (children-of p)]
+        (first (keep-indexed (fn [i s] (when (= s id) i)) sibs))))))
+
+(defn prev-sibling [id]
+  (let [p (parent-of id) sibs (children-of p) si (sibling-index id)]
+    (when (and si (> si 0)) (nth sibs (dec si)))))
+
+(defn next-sibling [id]
+  (let [p (parent-of id) sibs (children-of p) si (sibling-index id)]
+    (when (and si (< si (dec (count sibs)))) (nth sibs (inc si)))))
+
+;; ── Mutations ──
+(defn update-node! [id f & args]
+  (swap! app (fn [st]
+               (let [nd (get-in st [:nodes id])]
+                 (if nd
+                   (assoc-in st [:nodes id] (apply f nd args))
+                   st)))))
+
+(defn set-text! [id text]
+  (push-undo!)
+  (update-node! id assoc :text text))
+
+(defn set-collapsed! [id v]
+  (update-node! id assoc :collapsed v))
+
+(defn toggle-collapsed! [id]
+  (update-node! id update :collapsed not))
+
+(defn toggle-completed! [id]
+  (push-undo!)
+  (update-node! id update :completed not))
+
+(defn focus! [id]
+  (swap! app assoc :focused id :cursor-pos 0))
+
+(defn set-mode! [m]
+  (swap! app assoc :mode m))
+
+(defn toggle-help! []
+  (swap! app update :help not))
+
+(defn add-child! [parent-id]
+  (push-undo!)
+  (let [nid (gen-id)]
+    (swap! app (fn [st]
+                 (-> st
+                     (assoc-in [:nodes nid] {:id nid :text "" :parent parent-id :children [] :collapsed false :completed false})
+                     (update-in [:nodes parent-id :children] #(vec (cons nid %))))))
+    (focus! nid)
+    nid))
+
+(defn add-sibling-below! [id]
+  "Insert at si (appears BELOW visually since flat-visible reverses)"
+  (push-undo!)
+  (let [p (parent-of id)]
+    (when p
+      (let [nid (gen-id)
+            sibs (children-of p)
+            si (sibling-index id)]
+        (swap! app (fn [st]
+                     (-> st
+                         (assoc-in [:nodes nid] {:id nid :text "" :parent p :children [] :collapsed false :completed false})
+                         (update-in [:nodes p :children]
+                                    (fn [chs]
+                                      (let [before (subvec chs 0 si)
+                                            after (subvec chs si)]
+                                        (into (conj before nid) after)))))))
+        (focus! nid)
+        nid))))
+
+(defn add-sibling-above! [id]
+  "Insert at si+1 (appears ABOVE visually since flat-visible reverses)"
+  (push-undo!)
+  (let [p (parent-of id)]
+    (when p
+      (let [nid (gen-id)
+            sibs (children-of p)
+            si (sibling-index id)]
+        (swap! app (fn [st]
+                     (-> st
+                         (assoc-in [:nodes nid] {:id nid :text "" :parent p :children [] :collapsed false :completed false})
+                         (update-in [:nodes p :children]
+                                    (fn [chs]
+                                      (let [before (subvec chs 0 (inc si))
+                                            after (subvec chs (inc si))]
+                                        (into (conj before nid) after)))))))
+        (focus! nid)
+        nid))))
+
+(defn delete-node! [id]
+  (push-undo!)
+  (when (not= id "root")
+    (let [p (parent-of id)
+          next-sib (next-sibling id)
+          prev-sib (prev-sibling id)]
+      (swap! app (fn [st]
+                   (let [all-ids (fn rec [nid]
+                                   (cons nid (mapcat rec (get-in st [:nodes nid :children]))))]
+                     (-> st
+                         (update :nodes #(apply dissoc % (all-ids id)))
+                         (update-in [:nodes p :children] (fn [chs] (vec (remove #(= % id) chs))))))))
+      ;; Focus on next sibling to keep cursor at same position
+      ;; Fall back to previous sibling, then parent, then root
+      (focus! (or next-sib prev-sib (parent-of id) "root")))))
+
+(defn indent! [id]
+  (push-undo!)
+  (let [ps (prev-sibling id)]
+    (when (and ps (not= ps "root"))
+      (let [p (parent-of id)
+            sibs (children-of p)
+            si (sibling-index id)]
+        (swap! app (fn [st]
+                     (-> st
+                         (update-in [:nodes p :children] (fn [chs] (vec (remove #(= % id) chs))))
+                         (update-in [:nodes ps :children] #(conj (vec %) id))
+                         (assoc-in [:nodes id :parent] ps))))
+        (focus! id)))))
+
+(defn outdent! [id]
+  (push-undo!)
+  (let [p (parent-of id)]
+    (when (and p (not= p "root"))
+      (let [gp (parent-of p)]
+        (when gp
+          (let [psibs (children-of p)
+                si (sibling-index id)
+                gp-sibs (children-of gp)
+                pi (sibling-index p)]
+            (swap! app (fn [st]
+                         (-> st
+                             (update-in [:nodes p :children] (fn [chs] (vec (remove #(= % id) chs))))
+                             (update-in [:nodes gp :children]
+                                        (fn [chs]
+                                          (let [before (subvec chs 0 (inc pi))
+                                                after (subvec chs (inc pi))]
+                                            (into (conj before id) after))))
+                             (assoc-in [:nodes id :parent] gp))))
+            (focus! id)))))))
+
+;; ── Navigation ──
+(defn nav-down []
+  (let [vs (flat-visible)
+        f (focused)
+        idx (index-of f)]
+    (when idx
+      (let [nxt (node-at-index (inc idx))]
+        (when nxt (focus! nxt))))))
+
+(defn nav-up []
+  (let [vs (flat-visible)
+        f (focused)
+        idx (index-of f)]
+    (when idx
+      (let [prv (node-at-index (dec idx))]
+        (when prv (focus! prv))))))
+
+(defn nav-first []
+  (let [vs (flat-visible)]
+    (when (> (count vs) 1)
+      (focus! (second vs)))))
+
+(defn nav-last []
+  (let [vs (flat-visible)]
+    (when (seq vs) (focus! (last vs)))))
+
+(defn collapse! [id]
+  (when (seq (children-of id))
+    (set-collapsed! id true)))
+
+(defn expand! [id]
+  (set-collapsed! id false))
+
+;; ── DOM Rendering ──
+(def app-el (.getElementById js/document "app"))
+
+(defn create-style []
+  (let [style (.createElement js/document "style")]
+    (set! (.-textContent style)
+          (str
+           "@font-face{font-family:JuliaMono;src:url(JuliaMonoSiesta-Regular.woff2) format(woff2)}"
+           "*{box-sizing:border-box;margin:0;padding:0}"
+           "body{font-family:JuliaMono,SF Mono,Consolas,monospace;background:#e8e5df;color:#1a1a1a;font-size:14px;overflow:hidden;height:100vh}"
+           "#app{display:flex;flex-direction:column;height:100vh;max-width:800px;margin:0 auto;background:#faf9f6;box-shadow:0 0 40px rgba(0,0,0,0.08)}"
+           ".toolbar{display:flex;align-items:center;gap:8px;padding:8px 20px;background:#fff;border-bottom:1px solid #e0dcd5;flex-shrink:0}"
+           ".toolbar button{background:#f5f3ef;color:#444;border:1px solid #d5d0c8;padding:5px 10px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px}"
+           ".toolbar button:hover{background:#e8e4dc;border-color:#b8b0a4}"
+           ".mode-indicator{font-weight:600;padding:3px 10px;border-radius:5px;font-size:11px;text-transform:uppercase;letter-spacing:0.5px}"
+           ".mode-normal{background:#e3f0ff;color:#1a6fc4}"
+           ".mode-insert{background:#e6f5e6;color:#2d8040}"
+           ".tree-container{flex:1;overflow-y:auto;padding:16px 0}"
+           ".node-row{display:flex;align-items:center;cursor:pointer;padding:3px 12px;border-left:3px solid transparent;min-height:30px}"
+           ".node-row:hover{background:rgba(0,0,0,0.03)}"
+           ".node-row.focused{background:rgba(26,111,196,0.06);border-left-color:#1a6fc4}"
+           ".bullet{width:18px;flex-shrink:0;display:flex;align-items:center;justify-content:center;color:#aaa;font-size:12px;user-select:none}"
+           ".bullet.expanded::before{content:'▾';color:#666}"
+           ".bullet.collapsed::before{content:'▸';color:#999}"
+           ".bullet.leaf::before{content:'•';color:#bbb}"
+           ".bullet.completed::before{content:'✓';color:#4caf50}"
+           ".text-node{flex:1;outline:none;white-space:pre-wrap;word-break:break-word;padding:2px 6px;border-radius:3px;line-height:1.5}"
+           ".text-node.completed{text-decoration:line-through;color:#aaa}"
+           ".text-node[contenteditable='true']{background:rgba(26,111,196,0.04);cursor:text;border-radius:4px}"
+           ".cursor-block{background:#1a6fc4;color:#fff;font-weight:600;border-radius:2px}"
+           ".status-bar{display:none}"
+           ".help-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;z-index:1000}"
+           ".help-box{background:#fff;border:1px solid #d5d0c8;border-radius:12px;padding:24px;max-width:500px;box-shadow:0 8px 30px rgba(0,0,0,0.12)}"
+           ".help-box h2{color:#1a1a1a;margin-bottom:16px;font-size:16px}"
+           ".help-box kbd{background:#f5f3ef;border:1px solid #d5d0c8;padding:2px 6px;border-radius:4px;font-family:SF Mono,Consolas,monospace;font-size:11px;margin-right:8px}"
+           ".help-box .help-row{margin-bottom:4px;color:#444}"
+           ".help-box .help-section{margin-bottom:12px}"
+           ".help-box .help-section h3{color:#888;font-size:11px;font-weight:600;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px}"
+           ))
+    (.appendChild (.-head js/document) style)))
+
+(defn node-depth [id]
+  (loop [n id d 0]
+    (let [p (parent-of n)]
+      (if (or (nil? p) (= p "root")) d (recur p (inc d))))))
+
+(defn render-node [id]
+  (let [node (node-at id)
+        d (node-depth id)
+        f (focused)
+        is-focused (= id f)
+        is-collapsed (:collapsed node)
+        has-children (seq (:children node))
+        completed (:completed node)
+        txt (:text node)
+        row (.createElement js/document "div")]
+    (.setAttribute row "data-id" id)
+    (set! (.-className row) (str "node-row" (when is-focused " focused")))
+    (set! (.. row -style -paddingLeft) (str (* d 20) "px"))
+    
+    ;; Bullet
+    (let [bullet (.createElement js/document "span")]
+      (set! (.-className bullet)
+            (str "bullet "
+                 (cond completed "completed"
+                       (not has-children) "leaf"
+                       is-collapsed "collapsed"
+                       :else "expanded")))
+      (.appendChild row bullet))
+    
+    ;; Text
+    (let [text-el (.createElement js/document "span")]
+      (set! (.-className text-el) (str "text-node" (when completed " completed")))
+      (if (and is-focused (= (mode) :normal))
+        ;; Normal mode: render block cursor at cursor-pos
+        (let [cp (or (:cursor-pos @app) 0)
+              before (subs txt 0 cp)
+              cursor-char (if (< cp (count txt)) (subs txt cp (inc cp)) " ")
+              after (if (< cp (count txt)) (subs txt (inc cp)) "")]
+          (.appendChild text-el (.createTextNode js/document before))
+          (let [cur (.createElement js/document "span")]
+            (set! (.-className cur) "cursor-block")
+            (set! (.-textContent cur) cursor-char)
+            (.appendChild text-el cur))
+          (.appendChild text-el (.createTextNode js/document after)))
+        ;; Insert or unfocused: plain text / contentEditable
+        (do
+          (set! (.-textContent text-el) txt)
+          (when (and is-focused (= (mode) :insert))
+            (.setAttribute text-el "contenteditable" "true")
+            (.addEventListener text-el "input" (fn [_]
+                                                 (set-text! id (.-textContent text-el))))
+            (.addEventListener text-el "blur" (fn [_]
+                                                (set-text! id (.-textContent text-el)))))))
+      (.appendChild row text-el))
+    row))
+
+(defn render-tree []
+  (let [container (.createElement js/document "div")]
+    (.setAttribute container "class" "tree-container")
+    (let [vs (flat-visible)]
+      (doseq [id vs]
+        (when (not= id "root")
+          (.appendChild container (render-node id)))))
+    ;; Replace or append
+    (let [existing (.querySelector js/document ".tree-container")]
+      (when existing (.remove existing)))
+    (.appendChild app-el container)))
+
+(defn render-toolbar []
+  (let [existing (.querySelector js/document ".toolbar")]
+    (when existing (.remove existing)))
+  (let [tb (.createElement js/document "div")]
+    (.setAttribute tb "class" "toolbar")
+    
+    ;; Mode indicator
+    (let [mi (.createElement js/document "span")]
+      (set! (.-className mi) (str "mode-indicator " (if (= (mode) :insert) "mode-insert" "mode-normal")))
+      (set! (.-textContent mi) (if (= (mode) :insert) "INSERT" "NORMAL"))
+      (.appendChild tb mi))
+    
+    ;; Save button
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "💾 Save")
+      (.addEventListener btn "click" (fn [_] (save-local)))
+      (.appendChild tb btn))
+    
+    ;; Export button
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "📤 Export")
+      (.addEventListener btn "click"
+                         (fn [_]
+                           (let [json-str (js/JSON.stringify (clj->js @app) nil 2)
+                                 blob (js/Blob. #js[json-str] #js{:type "application/json"})
+                                 url (.createObjectURL js/URL blob)
+                                 a (.createElement js/document "a")]
+                             (set! (.-href a) url)
+                             (set! (.-download a) "vimflowy-export.json")
+                             (.click a)
+                             (.revokeObjectURL js/URL url))))
+      (.appendChild tb btn))
+    
+    ;; Import button
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "📥 Import")
+      (.addEventListener btn "click"
+                         (fn [_]
+                           (let [inp (.createElement js/document "input")]
+                             (set! (.-type inp) "file")
+                             (set! (.-accept inp) ".json")
+                             (.addEventListener inp "change"
+                                                (fn [e]
+                                                  (let [file (aget (.. e -target -files) 0)]
+                                                    (when file
+                                                      (let [reader (js/FileReader.)]
+                                                        (set! (.-onload reader)
+                                                              (fn [ev]
+                                                                (try
+                                                                  (let [data (js->clj (js/JSON.parse (.. ev -target -result)) :keywordize-keys true)]
+                                                                    (reset! app data)
+                                                                    (render-all!)
+                                                                    (save-local))
+                                                                  (catch js/Error err
+                                                                    (js/alert "Invalid JSON file")))))
+                                                        (.readAsText reader))))))
+                             (.click inp))))
+      (.appendChild tb btn))
+    
+    ;; OneDrive buttons
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "☁️ OneDrive Save")
+      (.addEventListener btn "click" one-drive-save)
+      (.appendChild tb btn))
+    
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "☁️ OneDrive Load")
+      (.addEventListener btn "click" one-drive-load)
+      (.appendChild tb btn))
+    
+    ;; Help
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "? Help")
+      (.addEventListener btn "click" (fn [_] (toggle-help!) (render-all!)))
+      (.appendChild tb btn))
+    
+    ;; Preview
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "👁 Preview")
+      (.addEventListener btn "click" (fn [_] (preview-html!)))
+      (.appendChild tb btn))
+    
+    (.appendChild app-el tb)))
+
+(defn render-status-bar [])
+
+(defn render-help []
+  (let [existing (.querySelector js/document ".help-overlay")]
+    (when existing (.remove existing)))
+  (when (help?)
+    (let [overlay (.createElement js/document "div")]
+      (.setAttribute overlay "class" "help-overlay")
+      (.addEventListener overlay "click" (fn [e]
+                                           (when (= (.-target e) overlay)
+                                             (toggle-help!)
+                                             (render-all!))))
+      (let [box (.createElement js/document "div")]
+        (.setAttribute box "class" "help-box")
+        (set! (.-innerHTML box)
+              (str
+               "<h2>Vimflowy Keybindings</h2>"
+               "<div class='help-section'><h3>Movement (NORMAL mode)</h3>"
+               "<div class='help-row'><kbd>j</kbd> Down</div>"
+               "<div class='help-row'><kbd>k</kbd> Up</div>"
+               "<div class='help-row'><kbd>gg</kbd> Go to first</div>"
+               "<div class='help-row'><kbd>G</kbd> Go to last</div>"
+               "</div>"
+               "<div class='help-section'><h3>Editing (NORMAL mode)</h3>"
+               "<div class='help-row'><kbd>i</kbd> Enter insert mode</div>"
+               "<div class='help-row'><kbd>o</kbd> Add child node</div>"
+               "<div class='help-row'><kbd>O</kbd> Add sibling above</div>"
+               "<div class='help-row'><kbd>dd</kbd> Delete node</div>"
+               "<div class='help-row'><kbd>x</kbd> Toggle complete</div>"
+               "</div>"
+               "<div class='help-section'><h3>Normal Mode Cursor</h3>"
+               "<div class='help-row'><kbd>h</kbd> Left</div>"
+               "<div class='help-row'><kbd>l</kbd> Right</div>"
+               "<div class='help-row'><kbd>w</kbd> Word forward</div>"
+               "<div class='help-row'><kbd>b</kbd> Word back</div>"
+               "<div class='help-row'><kbd>e</kbd> Word end</div>"
+               "<div class='help-row'><kbd>D</kbd> Delete to end</div>"
+               "<div class='help-row'><kbd>f{char}</kbd> Find char</div>"
+               "<div class='help-row'><kbd>t{char}</kbd> Till char</div>"
+               "</div>"
+               "<div class='help-section'><h3>Structure</h3>"
+               "<div class='help-row'><kbd>&gt;</kbd> Indent</div>"
+               "<div class='help-row'><kbd>&lt;</kbd> Outdent</div>"
+               "</div>"
+               "<div class='help-section'><h3>Other</h3>"
+               "<div class='help-row'><kbd>Esc</kbd> Normal mode / close</div>"
+               "<div class='help-row'><kbd>?</kbd> Toggle help</div>"
+               "</div>"))
+        (.appendChild overlay box))
+      (.appendChild app-el overlay))))
+
+(defn render-all! []
+  (render-toolbar)
+  (render-tree)
+  (render-status-bar)
+  (render-help)
+  ;; Auto-focus contentEditable in INSERT mode, preserving cursor-pos
+  (when (= (mode) :insert)
+    (js/console.log "focus: mode=insert focused=" (focused))
+    (when-let [fid (focused)]
+      (when-let [row (.querySelector js/document (str ".node-row[data-id='" fid "']"))]
+        (when-let [text-el (.querySelector row ".text-node")]
+          (js/console.log "focus: found text-el")
+          (.focus text-el)
+          (js/console.log "focus: after .focus, active=" (.-tagName (.-activeElement js/document)) "isContentEditable=" (.-isContentEditable (.-activeElement js/document)))
+          ;; Set selection to cursor-pos from NORMAL mode
+          (let [cp (:cursor-pos @app 0)
+                sel (js/window.getSelection)
+                range (.createRange js/document)]
+            (if-let [text-node (.-firstChild text-el)]
+              (let [safe-pos (min cp (.-length text-node))]
+                (.setStart range text-node safe-pos)
+                (.collapse range true)
+                (.removeAllRanges sel)
+                (.addRange sel range))
+              ;; Empty text node — just place cursor at start
+              (let [tn (.createTextNode js/document "")]
+                (.appendChild text-el tn)
+                (.setStart range tn 0)
+                (.collapse range true)
+                (.removeAllRanges sel)
+                (.addRange sel range)))))))))
+
+;; ── Keyboard Handler ──
+(defonce key-seq (atom []))
+(defonce key-timer (atom nil))
+(defonce pending-motion (atom nil))
+(defonce pending-operator (atom nil))    ;; nil, :c, :d
+(defonce pending-object-type (atom nil)) ;; nil, :inner, :a
+(defonce op-suppress (atom false))       ;; prevent d→operator after dd
+(defonce last-key (atom nil))
+(defonce last-key-time (atom 0))
+(defonce pending-op (atom nil))
+
+;; ── Undo/Redo ──
+(defonce undo-stack (atom []))
+(defonce redo-stack (atom []))
+
+(defn push-undo! []
+  (swap! undo-stack conj (js/JSON.stringify (clj->js @app)))
+  (reset! redo-stack []))
+
+(defn undo! []
+  (when (seq @undo-stack)
+    (swap! redo-stack conj (js/JSON.stringify (clj->js @app)))
+    (let [prev (last @undo-stack)]
+      (swap! undo-stack #(into [] (butlast %)))
+      (reset! app (.parse js/JSON prev))
+      (swap! app assoc :mode :normal :cursor-pos 0)
+      (render-all!))))
+
+(defn redo! []
+  (when (seq @redo-stack)
+    (swap! undo-stack conj (js/JSON.stringify (clj->js @app)))
+    (let [next-state (last @redo-stack)]
+      (swap! redo-stack #(into [] (butlast %)))
+      (reset! app (.parse js/JSON next-state))
+      (swap! app assoc :mode :normal :cursor-pos 0)
+      (render-all!))))
+
+;; ── Helpers ──
+(defn word-delim? [ch]
+  (or (= ch " ") (= ch "\t") (= ch "\n")))
+
+(defn tree->html [nodes node-id]
+  "Recursively generate <li>...</li> HTML string for a node and its children."
+  (let [node (get nodes node-id)
+        text (:text node "")
+        completed (:completed node false)
+        children (:children node [])
+        done-class (if completed " class='done'" "")
+        escaped-text (-> text
+                         (.replace "&" "&amp;")
+                         (.replace "<" "&lt;")
+                         (.replace ">" "&gt;")
+                         (.replace "\"" "&quot;")
+                         (.replace "'" "&#39;"))]
+    (if (= node-id "root")
+      ;; Root: just render children (skip root text), reverse for visual order
+      (when (seq children)
+        (str "<ul>"
+             (apply str (for [child-id (reverse children)]
+                          (tree->html nodes child-id)))
+             "</ul>"))
+      ;; Non-root: render text + children, reverse for visual order
+      (str "<li" done-class ">" escaped-text
+           (when (seq children)
+             (str "<ul>"
+                  (apply str (for [child-id (reverse children)]
+                               (tree->html nodes child-id)))
+                  "</ul>"))
+           "</li>"))))
+
+(defn preview-html! []
+  "Generate an HTML preview of the entire tree and open in a new window."
+  (let [nodes (:nodes @app)
+        body-html (tree->html nodes "root")
+        full-html (str "<!DOCTYPE html>\n<html><head><meta charset='UTF-8'><title>flowvi</title><style>"
+                       "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:24px 32px;line-height:1.8;color:#1a1a1a;background:#faf9f6;max-width:720px;margin:0 auto}"
+                       "ul{list-style-type:none;padding-left:24px;margin:0}"
+                       "li{padding:2px 0}"
+                       ".done{text-decoration:line-through;color:#999}"
+                       "</style></head><body><ul>" body-html "</ul></body></html>")
+        blob (js/Blob. #js[full-html] #js{:type "text/html"})
+        url (.createObjectURL js/URL blob)]
+    (js/window.open url "_blank")))
+
+;; ── Text Object Range Functions ──
+
+(defn word-range-inner [text pos]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len) (not (word-delim? (str (aget text pos)))))
+      (let [start (loop [i pos]
+                    (if (or (<= i 0) (word-delim? (str (aget text (dec i)))))
+                      i
+                      (recur (dec i))))
+            end (loop [i pos]
+                  (if (or (>= i (dec len)) (word-delim? (str (aget text (inc i)))))
+                    (inc i)
+                    (recur (inc i))))]
+        [start end]))))
+
+(defn word-range-a [text pos]
+  (when-let [[start end] (word-range-inner text pos)]
+    (let [len (count text)
+          end2 (loop [i end]
+                 (if (and (< i len) (word-delim? (str (aget text i))))
+                   (recur (inc i))
+                   i))]
+      [start end2])))
+
+(defn quote-range-inner [text pos qch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos)]
+                       (if (< i 0) nil
+                         (if (= (str (aget text i)) qch) i (recur (dec i)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos)]
+                          (if (>= i len) nil
+                            (if (= (str (aget text i)) qch) i (recur (inc i))))))]
+        (when (and open-pos close-pos)
+          [(inc open-pos) close-pos])))))
+
+(defn quote-range-a [text pos qch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos)]
+                       (if (< i 0) nil
+                         (if (= (str (aget text i)) qch) i (recur (dec i)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos)]
+                          (if (>= i len) nil
+                            (if (= (str (aget text i)) qch) i (recur (inc i))))))]
+        (when (and open-pos close-pos)
+          [open-pos (inc close-pos)])))))
+
+(defn bracket-range-inner [text pos open-ch close-ch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos) depth 1]
+                       (if (< i 0) nil
+                         (let [ch (str (aget text i))]
+                           (cond
+                             (= ch close-ch) (recur (dec i) (inc depth))
+                             (= ch open-ch)  (if (= depth 1) i (recur (dec i) (dec depth)))
+                             :else            (recur (dec i) depth)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos) depth 1]
+                          (if (>= i len) nil
+                            (let [ch (str (aget text i))]
+                              (cond
+                                (= ch open-ch)  (recur (inc i) (inc depth))
+                                (= ch close-ch) (if (= depth 1) i (recur (inc i) (dec depth)))
+                                :else            (recur (inc i) depth))))))]
+        (when (and open-pos close-pos)
+          [(inc open-pos) close-pos])))))
+
+(defn bracket-range-a [text pos open-ch close-ch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos) depth 1]
+                       (if (< i 0) nil
+                         (let [ch (str (aget text i))]
+                           (cond
+                             (= ch close-ch) (recur (dec i) (inc depth))
+                             (= ch open-ch)  (if (= depth 1) i (recur (dec i) (dec depth)))
+                             :else            (recur (dec i) depth)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos) depth 1]
+                          (if (>= i len) nil
+                            (let [ch (str (aget text i))]
+                              (cond
+                                (= ch open-ch)  (recur (inc i) (inc depth))
+                                (= ch close-ch) (if (= depth 1) i (recur (inc i) (dec depth)))
+                                :else            (recur (inc i) depth))))))]
+        (when (and open-pos close-pos)
+          [open-pos (inc close-pos)])))))
+
+(defn get-object-range [text pos obj-key obj-type]
+  (let [inner? (= obj-type :inner)]
+    (case obj-key
+      "w" (if inner? (word-range-inner text pos) (word-range-a text pos))
+      ("\"" "'") (if inner? (quote-range-inner text pos obj-key) (quote-range-a text pos obj-key))
+      ("(" ")") (if inner? (bracket-range-inner text pos "(" ")") (bracket-range-a text pos "(" ")"))
+      ("[" "]") (if inner? (bracket-range-inner text pos "[" "]") (bracket-range-a text pos "[" "]"))
+      ("{" "}") (if inner? (bracket-range-inner text pos "{" "}") (bracket-range-a text pos "{" "}"))
+      ("<" ">") (if inner? (bracket-range-inner text pos "<" ">") (bracket-range-a text pos "<" ">"))
+      nil)))
+
+(defn execute-operator! [start end]
+  (let [txt (focused-text)
+        op @pending-operator
+        new-txt (str (subs txt 0 start) (subs txt end))
+        fid (focused)]
+    (set-text! fid new-txt)
+    (swap! app assoc :cursor-pos start)
+    (when (= op :c)
+      (set-mode! :insert))
+    (reset! pending-operator nil)
+    (reset! pending-object-type nil)
+    (render-all!)))
+
+;; ── Normal-mode cursor helpers (app state :cursor-pos) ──
+(defn focused-text []
+  (:text (node-at (focused)) ""))
+
+(defn cp [] (:cursor-pos @app 0))
+
+(defn cp-left! []
+  (swap! app update :cursor-pos #(max 0 (dec (or % 0)))))
+
+(defn cp-right! []
+  (let [txt (focused-text)]
+    (swap! app update :cursor-pos #(min (count txt) (inc (or % 0))))))
+
+(defn cp-word-forward! []
+  (let [txt (focused-text)
+        len (count txt)
+        pos (cp)
+        i (loop [i pos]
+            (if (and (< i len) (not (word-delim? (str (aget txt i)))))
+              (recur (inc i))
+              i))
+        j (loop [j i]
+            (if (and (< j len) (word-delim? (str (aget txt j))))
+              (recur (inc j))
+              j))]
+    (swap! app assoc :cursor-pos j)))
+
+(defn cp-word-backward! []
+  (let [txt (focused-text)
+        pos (cp)]
+    (if (<= pos 0)
+      (swap! app assoc :cursor-pos 0)
+      (loop [i (dec pos)]
+        (if (< i 0)
+          (swap! app assoc :cursor-pos 0)
+          (if (word-delim? (str (aget txt i)))
+            (recur (dec i))
+            (loop [j i]
+              (if (or (< j 0) (word-delim? (str (aget txt j))))
+                (swap! app assoc :cursor-pos (inc j))
+                (recur (dec j))))))))))
+
+(defn cp-word-end! []
+  (let [txt (focused-text)
+        len (count txt)
+        pos (cp)]
+    ;; Skip current word if on a word char, then skip whitespace, then skip next word to its end
+    (loop [i pos]
+      (cond
+        (>= i len) (swap! app assoc :cursor-pos (max 0 (dec len)))
+        (not (word-delim? (str (aget txt i)))) (recur (inc i))  ;; skip to end of current word
+        :else
+        ;; i is at whitespace, skip it, then skip next word to its end
+        (let [j (loop [k i]
+                  (if (and (< k len) (word-delim? (str (aget txt k))))
+                    (recur (inc k))
+                    k))]
+          (if (>= j len)
+            (swap! app assoc :cursor-pos (max 0 (dec len)))
+            (loop [m j]
+              (if (and (< (inc m) len) (not (word-delim? (str (aget txt (inc m))))))
+                (recur (inc m))
+                (swap! app assoc :cursor-pos m)))))))))
+
+(defn cp-delete-to-end! []
+  (push-undo!)
+  (let [txt (focused-text)
+        pos (cp)
+        new-txt (subs txt 0 pos)]
+    (set-text! (focused) new-txt)
+    (swap! app assoc :cursor-pos (count new-txt))))
+
+(defn cp-word-end-backward! []
+  (let [txt (focused-text)
+        pos (cp)]
+    (if (<= pos 0)
+      (swap! app assoc :cursor-pos 0)
+      ;; Go left to find end of previous word
+      (loop [i (dec pos)]
+        (cond
+          (< i 0) (swap! app assoc :cursor-pos 0)
+          (word-delim? (str (aget txt i))) (recur (dec i))  ;; skip whitespace backward
+          :else
+          ;; i is at last char of a word, go to start of that word, then forward to its end
+          (loop [j i]
+            (if (or (< j 0) (word-delim? (str (aget txt j))))
+              ;; j+1 is start of word, now find its end
+              (loop [k (inc j)]
+                (if (and (< (inc k) (count txt)) (not (word-delim? (str (aget txt (inc k))))))
+                  (recur (inc k))
+                  (swap! app assoc :cursor-pos k)))
+              (recur (dec j)))))))))
+
+(defn word-range [text pos]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [start (loop [i pos] (if (or (<= i 0) (word-delim? (str (aget text (dec i))))) i (recur (dec i))))
+            end   (loop [i pos] (if (or (>= i len) (word-delim? (str (aget text i)))) i (recur (inc i))))]
+        [start end]))))
+
+(defn execute-op! [op start end]
+  (push-undo!)
+  (let [txt (focused-text)]
+    (set-text! (focused) (str (subs txt 0 start) (subs txt end (count txt))))
+    (swap! app assoc :cursor-pos start)
+    (when (= op :c) (set-mode! :insert) (render-all!))
+    (when (= op :d) (render-tree))))
+
+(defn cp-find-char! [ch]
+  (let [txt (focused-text)
+        pos (cp)
+        next-idx (.indexOf txt ch (inc pos))]
+    (when (>= next-idx 0)
+      (swap! app assoc :cursor-pos next-idx))))
+
+(defn cp-till-char! [ch]
+  (let [txt (focused-text)
+        pos (cp)
+        next-idx (.indexOf txt ch (inc pos))]
+    (when (>= next-idx 0)
+      (swap! app assoc :cursor-pos (max 0 (dec next-idx))))))
+
+;; ── Cursor / Text Helpers (DOM, insert mode) ──
+
+(defn get-text-el []
+  (let [active-el (.-activeElement js/document)]
+    (when (and active-el (.. active-el -classList (contains "text-node")))
+      active-el)))
+
+(defn get-cursor-pos [el]
+  (try
+    (let [sel (js/window.getSelection)]
+      (when (and sel (pos? (.-rangeCount sel)))
+        (let [range (.getRangeAt sel 0)
+              text-node (.-firstChild el)]
+          (when (and text-node (= (.-nodeType text-node) 3))
+            (let [pre-range (.cloneRange range)]
+              (.setStart pre-range text-node 0)
+              (.-length (.toString pre-range)))))))
+    (catch js/Error _ nil)))
+
+(defn set-cursor-pos [el pos]
+  (let [text-node (.-firstChild el)]
+    (when (and text-node (= (.-nodeType text-node) 3))
+      (let [len (.-length text-node)
+            safe-pos (max 0 (min pos len))
+            range (.createRange js/document)
+            sel (js/window.getSelection)]
+        (.setStart range text-node safe-pos)
+        (.collapse range true)
+        (.removeAllRanges sel)
+        (.addRange sel range)
+        (.focus el)))))
+
+(defn cursor-word-forward! [el]
+  (when-let [pos (get-cursor-pos el)]
+    (let [text (.-textContent el)
+          len (count text)]
+      (loop [i pos]
+        (let [i (loop [j i]
+                  (if (and (< j len) (not (word-delim? (str (aget text j)))))
+                    (recur (inc j))
+                    j))
+              i (loop [j i]
+                  (if (and (< j len) (word-delim? (str (aget text j))))
+                    (recur (inc j))
+                    j))]
+          (set-cursor-pos el i))))))
+
+(defn cursor-word-backward! [el]
+  (when-let [pos (get-cursor-pos el)]
+    (let [text (.-textContent el)]
+      (loop [i (dec pos)]
+        (if (< i 0)
+          (set-cursor-pos el 0)
+          (if (word-delim? (str (aget text i)))
+            (recur (dec i))
+            (loop [j i]
+              (if (or (< j 0) (word-delim? (str (aget text j))))
+                (set-cursor-pos el (inc j))
+                (recur (dec j))))))))))
+
+(defn cursor-word-end! [el]
+  (when-let [pos (get-cursor-pos el)]
+    (let [text (.-textContent el)
+          len (count text)]
+      (loop [i pos]
+        (let [i (if (and (< i len) (word-delim? (str (aget text i))))
+                  (loop [j i]
+                    (if (and (< j len) (word-delim? (str (aget text j))))
+                      (recur (inc j))
+                      j))
+                  i)]
+          (if (>= i len)
+            (set-cursor-pos el (max 0 (dec len)))
+            (loop [j i]
+              (if (and (< (inc j) len) (not (word-delim? (str (aget text (inc j))))))
+                (recur (inc j))
+                (set-cursor-pos el j)))))))))
+
+(defn cursor-word-end-backward! [el]
+  (when-let [pos (get-cursor-pos el)]
+    (let [text (.-textContent el)
+          len (count text)]
+      (loop [i (dec pos)]
+        (cond
+          (< i 0) (set-cursor-pos el 0)
+          (word-delim? (str (aget text i))) (recur (dec i))
+          :else
+          (let [word-end i
+                start (loop [j word-end]
+                        (if (and (> j 0) (not (word-delim? (str (aget text (dec j))))))
+                          (recur (dec j))
+                          j))]
+            (loop [j start]
+              (if (and (< (inc j) len) (not (word-delim? (str (aget text (inc j))))))
+                (recur (inc j))
+                (set-cursor-pos el j)))))))))
+
+(defn cursor-find-char! [el ch]
+  (when-let [pos (get-cursor-pos el)]
+    (let [text (.-textContent el)
+          next-idx (.indexOf text ch (inc pos))]
+      (when (>= next-idx 0)
+        (set-cursor-pos el next-idx)))))
+
+(defn cursor-till-char! [el ch]
+  (when-let [pos (get-cursor-pos el)]
+    (let [text (.-textContent el)
+          next-idx (.indexOf text ch (inc pos))]
+      (when (>= next-idx 0)
+        (set-cursor-pos el (dec next-idx))))))
+
+(defn handle-key [e]
+  (let [key (.-key e)
+        ctrl (.-ctrlKey e)
+        m (mode)]
+    
+    ;; Global: Escape / Ctrl+[
+    (when (or (= key "Escape") (and ctrl (= key "[")))
+      (.preventDefault e)
+      (when (help?) (toggle-help!) (render-all!))
+      (reset! pending-operator nil)
+      (reset! pending-object-type nil)
+      (when (= m :insert)
+        ;; Save current text AND cursor position before exiting insert mode
+        (let [active-el (.-activeElement js/document)]
+          (when (and active-el (.. active-el -classList (contains "text-node")))
+            (set-text! (focused) (.-textContent active-el))
+            ;; Save cursor position from contentEditable
+            (let [sel (js/window.getSelection)]
+              (when (and sel (pos? (.-rangeCount sel)))
+                (let [rng (.getRangeAt sel 0)
+                      pre-rng (.createRange js/document)]
+                  (.setStart pre-rng active-el 0)
+                  (.setEnd pre-rng (.-startContainer rng) (.-startOffset rng))
+                  (swap! app assoc :cursor-pos (.-length (.toString pre-rng))))))))
+        (set-mode! :normal)
+        (render-all!)
+        (reset! pending-op nil))
+      (js/clearTimeout @key-timer)
+      (reset! key-seq [])
+      (when (not= m :normal) (render-all!)))
+    
+    ;; Cancel pending-op on Escape (already handled above via key reset)
+    
+    ;; Global: Ctrl+O in normal mode = create child + insert
+    (when (and (= m :normal) ctrl (= key "o"))
+      (.preventDefault e)
+      (add-child! (focused))
+      (set-mode! :insert)
+      (render-all!))
+    
+    ;; Global: ? toggles help
+    (when (and (= key "?") (not ctrl) (= m :normal) (not (help?)))
+      (.preventDefault e)
+      (toggle-help!)
+      (render-all!))
+    
+    ;; Global: gg / dd (double-tap detection via last-key atom)
+    (when (= m :normal)
+      (when (and (= key "g") (= @last-key "g") (< (- (.now js/Date) @last-key-time) 800))
+        (.preventDefault e)
+        (nav-first)
+        (render-tree) (render-status-bar)
+        (reset! last-key nil) (reset! key-seq []))
+      (when (and (= key "d") (= @last-key "d") (< (- (.now js/Date) @last-key-time) 800))
+        (.preventDefault e)
+        (delete-node! (focused))
+        (render-all!)
+        (reset! last-key nil) (reset! key-seq [])))
+    
+    ;; Global: ciw / diw / cw / dw
+    (when (= m :normal)
+      (let [po @pending-op
+            k (.-key e)]
+        (if (and (nil? po) (identical? k "c"))
+          (do (.preventDefault e) (reset! pending-op :c))
+          (if (and (nil? po) (identical? k "d"))
+            (do (.preventDefault e) (reset! pending-op :d))
+            (if (and (some? po) (not (map? po)) (identical? k "i"))
+              (do (.preventDefault e) (reset! pending-op {:op po :type :inner}))
+              ;; cw / dw = from cursor to end of word
+              (if (and (some? po) (not (map? po)) (identical? k "w"))
+                (do (.preventDefault e)
+                    (let [r (word-range (focused-text) (cp))
+                          start (cp)
+                          end (second r)]
+                      (when r (execute-op! po start end)))
+                    (reset! pending-op :consumed))
+                ;; ciw / diw execute
+                (if (and (some? po) (map? po) (identical? k "w"))
+                  (do (.preventDefault e)
+                      (let [r (word-range (focused-text) (cp))]
+                        (when r (execute-op! (:op po) (first r) (second r))))
+                      (reset! pending-op :consumed))
+                  nil)))))))
+    
+    ;; Skip normal handler if ciw/diw just executed (keep flag for check below)
+    (when (identical? @pending-op :consumed) nil)
+    
+    ;; Cancel pending-op on Escape or any non-ciw key
+    (when (and @pending-op (= m :normal) (not (contains? #{"c" "d" "i" "w"} key)))
+      (reset! pending-op nil))
+    
+    ;; Normal mode keys (skip if ciw/diw just consumed the key)
+    (when (and (= m :normal) (not (identical? @pending-op :consumed)))
+      (let [seq-str (.join (apply array (conj @key-seq key) ""))
+            pm @pending-motion]
+        
+        ;; Handle pending f/t/g motions
+        (when pm
+            (.preventDefault e)
+            (case (:type pm)
+              :f (cp-find-char! key)
+              :t (cp-till-char! key)
+              :g (when (= key "e") (cp-word-end-backward!))
+              nil)
+            (reset! pending-motion nil)
+            (render-tree))
+          
+          ;; Handle f/t/g — set pending motion (only if no pending already, and not consumed by gg/dd)
+          (when (and (not pm) (not (contains? #{"gg" "dd"} seq-str)) (contains? #{"f" "t" "g"} key))
+            (.preventDefault e)
+            (reset! pending-motion {:type (case key "f" :f "t" :t "g" :g nil)})
+            (swap! key-seq conj key))
+          
+          ;; Handle other keys
+          (when (and (not pm) (not (contains? #{"f" "t" "g"} key)))
+          (cond
+            
+            ;; j/k: navigate rows
+            (= key "j") (do (.preventDefault e) (nav-down) (render-tree) (render-status-bar) (reset! key-seq []))
+            
+            (= key "k") (do (.preventDefault e) (nav-up) (render-tree) (render-status-bar) (reset! key-seq []))
+            
+            ;; i: enter insert mode (skip if ciw/diw pending)
+            (= key "i") (if @pending-op nil (do (.preventDefault e) (set-mode! :insert) (render-all!)))
+            
+            ;; a: append
+            (= key "a") (if @pending-op nil (do (.preventDefault e) (cp-right!) (set-mode! :insert) (render-all!)))
+            
+            ;; $: go to end of line
+            (= key "$") (do (.preventDefault e) (let [txt (focused-text)] (swap! app assoc :cursor-pos (count txt))) (render-tree) (reset! key-seq []))
+            
+            ;; o: add child and enter insert
+            ;; o: add sibling below, stay in NORMAL
+            (= key "o") (if ctrl nil (do (.preventDefault e) (add-sibling-below! (focused)) (set-mode! :insert) (render-all!) (reset! key-seq [])))
+            
+            ;; O: add sibling above, stay in NORMAL
+            (= key "O") (if ctrl nil (do (.preventDefault e) (when (not= (focused) "root") (add-sibling-above! (focused)) (set-mode! :insert) (render-all!)) (reset! key-seq [])))
+            
+            ;; h/l: cursor left/right
+            (= key "h") (do (.preventDefault e) (cp-left!) (render-tree) (reset! key-seq []))
+            (= key "l") (do (.preventDefault e) (cp-right!) (render-tree) (reset! key-seq []))
+            
+            ;; w/b/e: word motions
+            (= key "w") (do (.preventDefault e) (cp-word-forward!) (render-tree) (reset! key-seq []))
+            (= key "b") (do (.preventDefault e) (cp-word-backward!) (render-tree) (reset! key-seq []))
+            (= key "e") (do (.preventDefault e) (cp-word-end!) (render-tree) (reset! key-seq []))
+            
+            ;; D: delete to end of line
+            (= key "D") (do (.preventDefault e) (cp-delete-to-end!) (render-tree) (reset! key-seq []))
+            
+            ;; x: toggle complete
+            (= key "x") (do (.preventDefault e) (toggle-completed! (focused)) (render-tree) (render-status-bar))
+            
+            ;; >/<: indent/outdent
+            (= key ">") (do (.preventDefault e) (indent! (focused)) (render-tree) (render-status-bar))
+            (= key "<") (do (.preventDefault e) (outdent! (focused)) (render-tree) (render-status-bar))
+            
+            ;; G: go to last
+            (= key "G") (do (.preventDefault e) (nav-last) (render-tree) (render-status-bar) (reset! key-seq []))
+            
+            ;; u: undo
+            (= key "u") (do (.preventDefault e) (undo!) (reset! key-seq []))
+            
+            ;; Ctrl+R: redo
+            (and ctrl (= key "r")) (do (.preventDefault e) (redo!))
+            
+            ;; Otherwise track for multi-key sequences
+            (not (contains? #{"Shift" "Control" "Alt" "Meta" "Tab" "Escape"} key))
+            (do
+              (swap! key-seq conj key)
+              (js/clearTimeout @key-timer)
+              (reset! key-timer (js/setTimeout (fn [] (reset! key-seq [])) 500)))))))
+    
+    ;; ── Track last key for double-tap detection ──
+    (when (identical? @pending-op :consumed) (reset! pending-op nil))
+    (reset! last-key-time (.now js/Date))
+    (reset! last-key key)
+    
+    ;; ── Insert mode: Ctrl+W delete word backward (chainable) ──
+    (when (and (= m :insert) ctrl (= key "w"))
+      (.preventDefault e)
+      (when-let [el (.-activeElement js/document)]
+        (when (.. el -classList (contains "text-node"))
+          (let [sel (js/window.getSelection)]
+            (when (pos? (.-rangeCount sel))
+              (let [rng (.getRangeAt sel 0)
+                    pos (.-startOffset rng)
+                    txt (.-textContent el)
+                    ;; Skip trailing whitespace, then find word start
+                    p (loop [i (dec pos)]
+                        (if (and (>= i 0) (= (aget txt i) " "))
+                          (recur (dec i))
+                          i))
+                    start (if (< p 0) 0
+                              (loop [i p]
+                                (if (or (< i 0) (= (aget txt i) " "))
+                                  (inc i)
+                                  (recur (dec i)))))
+                    new-txt (str (subs txt 0 start) (subs txt pos))]
+                (set! (.-textContent el) new-txt)
+                (set-text! (focused) new-txt)
+                (let [r2 (.createRange js/document)
+                      tn (.-firstChild el)]
+                  (when tn
+                    (.setStart r2 tn start)
+                    (.collapse r2 true)
+                    (.removeAllRanges sel)
+                    (.addRange sel r2)))))))))
+    
+    ;; ── Insert mode: Shift+Enter creates child node ──
+    (when (and (= m :insert) (= key "Enter") (.-shiftKey e))
+      (.preventDefault e)
+      (let [active-el (.-activeElement js/document)]
+        (when (and active-el (.. active-el -classList (contains "text-node")))
+          (set-text! (focused) (.-textContent active-el))))
+      (add-child! (focused))
+      (render-all!))
+    
+    ;; ── Insert mode: Enter for new sibling ──
+    (when (and (= m :insert) (= key "Enter") (not ctrl) (not (.-shiftKey e)))
+      (.preventDefault e)
+      ;; Save current text before adding sibling
+      (let [active-el (.-activeElement js/document)]
+        (when (and active-el (.. active-el -classList (contains "text-node")))
+          (set-text! (focused) (.-textContent active-el))))
+      (let [f (focused)]
+        (add-sibling-below! f)
+        (render-all!)))))
+
+;; ── Click Handler ──
+(defn handle-click [e]
+  (let [target (.-target e)
+        row (.closest target ".node-row")]
+    (when row
+      (let [id (.getAttribute row "data-id")]
+        (when id
+          ;; If already focused in insert mode, let browser handle the click
+          (if (and (= id (focused)) (= (mode) :insert))
+            nil
+            (do
+              (focus! id)
+              (when (or (.matches target ".text-node")
+                        (.matches target ".node-row"))
+                (set-mode! :insert))
+              (render-all!))))))))
+
+;; ── OneDrive Integration ──
+(def one-drive-client-id "00000000-0000-0000-0000-000000000000") ;; placeholder
+(def one-drive-token (atom nil))
+
+(defn one-drive-auth []
+  (js/alert "OneDrive: Configure your client-id in the source (one-drive-client-id) and set redirect URI to this page."))
+
+(defn one-drive-save [_]
+  (if @one-drive-token
+    (let [content (js/JSON.stringify (clj->js @app))
+          filename "vimflowy-data.json"]
+      (-> (js/fetch (str "https://graph.microsoft.com/v1.0/me/drive/root:/" filename ":/content")
+                    #js{:method "PUT"
+                        :headers #js{"Authorization" (str "Bearer " @one-drive-token)
+                                     "Content-Type" "application/json"}
+                        :body content})
+          (.then (fn [r] (if (.-ok r) (js/alert "Saved to OneDrive!") (js/alert "Save failed. Token may be expired."))))
+          (.catch (fn [_] (js/alert "Network error")))))
+    (one-drive-auth)))
+
+(defn one-drive-load [_]
+  (if @one-drive-token
+    (-> (js/fetch "https://graph.microsoft.com/v1.0/me/drive/root:/vimflowy-data.json:/content"
+                  #js{:headers #js{"Authorization" (str "Bearer " @one-drive-token)}})
+        (.then (fn [r] (.json r)))
+        (.then (fn [data]
+                 (let [d (js->clj data :keywordize-keys true)]
+                   (reset! app d)
+                   (render-all!)
+                   (save-local)
+                   (js/alert "Loaded from OneDrive!"))))
+        (.catch (fn [_] (js/alert "Load failed. Token may be expired."))))
+    (one-drive-auth)))
+
+;; ── Auto-save ──
+(defonce auto-save-interval
+  (js/setInterval
+   (fn []
+     (when (and @app (not= (:mode @app) :insert))
+       (save-local)))
+   5000))
+
+;; ── Init ──
+(defonce init-done (atom false))
+(defn init! []
+  (when @init-done nil)  ;; skip if already initialized
+  (if @init-done
+    nil
+    (do
+      (reset! init-done true)
+  (create-style)
+  ;; Try loading from localStorage
+  (when-not (load-local)
+    ;; Fresh state
+    (let [root-id "root"
+          c1 (gen-id)
+          c2 (gen-id)
+          gc (gen-id)]
+      (reset! app {:nodes {root-id {:id root-id :text "Vimflowy" :parent nil :children [c1 c2] :collapsed false :completed false}
+                           c1 {:id c1 :text "Welcome to Vimflowy!" :parent root-id :children [gc] :collapsed false :completed false}
+                           c2 {:id c2 :text "Press ? for help" :parent root-id :children [] :collapsed false :completed false}
+                           gc {:id gc :text "Try j/k to navigate, o to add" :parent c1 :children [] :collapsed false :completed false}}
+                   :focused root-id
+                   :mode :normal
+                   :help false
+                   :cursor-pos 0})))
+  ;; Event listeners
+  (.addEventListener js/document "keydown" handle-key)
+  (.addEventListener js/document "click" handle-click)
+  (render-all!))))
+
+(init!)
+</script>
+
+<script type="module">
+import { compileString } from 'https://unpkg.com/squint-cljs/index.js';
+
+const source = document.getElementById('squint-src').textContent;
+
+try {
+  const js = compileString(source, { core_module: 'squint-cljs/core.js' });
+  const blob = new Blob([js], { type: 'application/javascript' });
+  const url = URL.createObjectURL(blob);
+  await import(url);
+} catch (err) {
+  console.error('Squint compilation failed:', err);
+}
+</script>
+</body>
+</html>
