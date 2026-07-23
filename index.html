@@ -73,7 +73,7 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
     (let [raw (.getItem js/localStorage storage-key)]
       (when raw
         (let [parsed (js->clj (js/JSON.parse raw) :keywordize-keys true)]
-          (reset! app parsed))
+          (reset! app (merge parsed {:cursor-pos 0 :help false})))
         true))
     (catch js/Error _ false)))
 
@@ -143,7 +143,7 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
   (update-node! id update :completed not))
 
 (defn focus! [id]
-  (swap! app assoc :focused id))
+  (swap! app assoc :focused id :cursor-pos 0))
 
 (defn set-mode! [m]
   (swap! app assoc :mode m))
@@ -240,7 +240,8 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
 
 (defn nav-first []
   (let [vs (flat-visible)]
-    (when (seq vs) (focus! (first vs)))))
+    (when (> (count vs) 1)
+      (focus! (second vs)))))
 
 (defn nav-last []
   (let [vs (flat-visible)]
@@ -281,6 +282,7 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
            ".text-node { flex: 1; outline: none; white-space: pre-wrap; word-break: break-word; padding: 2px 4px; border-radius: 3px; }"
            ".text-node.completed { text-decoration: line-through; color: #666; }"
            ".text-node[contenteditable='true'] { background: rgba(255,255,255,0.05); cursor: text; }"
+           ".cursor-block { background: #e94560; color: #1a1a2e; }"
            ".status-bar { display: flex; align-items: center; gap: 16px; padding: 4px 16px; background: #16213e; border-top: 1px solid #0f3460; font-size: 11px; color: #888; flex-shrink: 0; }"
            ".help-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 1000; }"
            ".help-box { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 24px; max-width: 500px; }"
@@ -324,13 +326,27 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
     ;; Text
     (let [text-el (.createElement js/document "span")]
       (set! (.-className text-el) (str "text-node" (when completed " completed")))
-      (set! (.-textContent text-el) txt)
-      (when (and is-focused (= (mode) :insert))
-        (.setAttribute text-el "contenteditable" "true")
-        (.addEventListener text-el "input" (fn [_]
-                                             (set-text! id (.-textContent text-el))))
-        (.addEventListener text-el "blur" (fn [_]
-                                            (set-text! id (.-textContent text-el)))))
+      (if (and is-focused (= (mode) :normal))
+        ;; Normal mode: render block cursor at cursor-pos
+        (let [cp (or (:cursor-pos @app) 0)
+              before (subs txt 0 cp)
+              cursor-char (if (< cp (count txt)) (subs txt cp (inc cp)) " ")
+              after (if (< cp (count txt)) (subs txt (inc cp)) "")]
+          (.appendChild text-el (.createTextNode js/document before))
+          (let [cur (.createElement js/document "span")]
+            (set! (.-className cur) "cursor-block")
+            (set! (.-textContent cur) cursor-char)
+            (.appendChild text-el cur))
+          (.appendChild text-el (.createTextNode js/document after)))
+        ;; Insert or unfocused: plain text / contentEditable
+        (do
+          (set! (.-textContent text-el) txt)
+          (when (and is-focused (= (mode) :insert))
+            (.setAttribute text-el "contenteditable" "true")
+            (.addEventListener text-el "input" (fn [_]
+                                                 (set-text! id (.-textContent text-el))))
+            (.addEventListener text-el "blur" (fn [_]
+                                                (set-text! id (.-textContent text-el)))))))
       (.appendChild row text-el))
     row))
 
@@ -462,17 +478,17 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
                "<div class='help-row'><kbd>dd</kbd> Delete node</div>"
                "<div class='help-row'><kbd>x</kbd> Toggle complete</div>"
                "</div>"
-               "<div class='help-section'><h3>Insert Mode Motions</h3>"
-               "<div class='help-row'><kbd>w</kbd> Next word start</div>"
-               "<div class='help-row'><kbd>b</kbd> Previous word start</div>"
+               "<div class='help-section'><h3>Normal Mode Cursor</h3>"
+               "<div class='help-row'><kbd>h</kbd> Left</div>"
+               "<div class='help-row'><kbd>l</kbd> Right</div>"
+               "<div class='help-row'><kbd>w</kbd> Word forward</div>"
+               "<div class='help-row'><kbd>b</kbd> Word back</div>"
                "<div class='help-row'><kbd>e</kbd> Word end</div>"
-               "<div class='help-row'><kbd>ge</kbd> Previous word end</div>"
-               "<div class='help-row'><kbd>f{char}</kbd> Find char forward</div>"
-               "<div class='help-row'><kbd>t{char}</kbd> Till char forward</div>"
+               "<div class='help-row'><kbd>D</kbd> Delete to end</div>"
+               "<div class='help-row'><kbd>f{char}</kbd> Find char</div>"
+               "<div class='help-row'><kbd>t{char}</kbd> Till char</div>"
                "</div>"
                "<div class='help-section'><h3>Structure</h3>"
-               "<div class='help-row'><kbd>h</kbd> Collapse</div>"
-               "<div class='help-row'><kbd>l</kbd> Expand</div>"
                "<div class='help-row'><kbd>&gt;</kbd> Indent</div>"
                "<div class='help-row'><kbd>&lt;</kbd> Outdent</div>"
                "</div>"
@@ -487,14 +503,262 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
   (render-toolbar)
   (render-tree)
   (render-status-bar)
-  (render-help))
+  (render-help)
+  ;; Auto-focus contentEditable in INSERT mode, preserving cursor-pos
+  (when (= (mode) :insert)
+    (when-let [fid (focused)]
+      (when-let [row (.querySelector js/document (str ".node-row[data-id='" fid "']"))]
+        (when-let [text-el (.querySelector row ".text-node")]
+          (.focus text-el)
+          ;; Set selection to cursor-pos from NORMAL mode
+          (let [cp (:cursor-pos @app 0)
+                sel (js/window.getSelection)
+                range (.createRange js/document)
+                text-node (.-firstChild text-el)]
+            (when text-node
+              (let [safe-pos (min cp (.-length text-node))]
+                (.setStart range text-node safe-pos)
+                (.collapse range true)
+                (.removeAllRanges sel)
+                (.addRange sel range)))))))))
 
 ;; ── Keyboard Handler ──
 (defonce key-seq (atom []))
 (defonce key-timer (atom nil))
 (defonce pending-motion (atom nil))
+(defonce pending-operator (atom nil))    ;; nil, :c, :d
+(defonce pending-object-type (atom nil)) ;; nil, :inner, :a
+(defonce op-suppress (atom false))       ;; prevent d→operator after dd
+(defonce last-key (atom nil))
+(defonce last-key-time (atom 0))
 
-;; ── Cursor / Text Helpers ──
+;; ── Helpers ──
+(defn word-delim? [ch]
+  (or (= ch " ") (= ch "\t") (= ch "\n")))
+
+;; ── Text Object Range Functions ──
+
+(defn word-range-inner [text pos]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len) (not (word-delim? (str (aget text pos)))))
+      (let [start (loop [i pos]
+                    (if (or (<= i 0) (word-delim? (str (aget text (dec i)))))
+                      i
+                      (recur (dec i))))
+            end (loop [i pos]
+                  (if (or (>= i (dec len)) (word-delim? (str (aget text (inc i)))))
+                    (inc i)
+                    (recur (inc i))))]
+        [start end]))))
+
+(defn word-range-a [text pos]
+  (when-let [[start end] (word-range-inner text pos)]
+    (let [len (count text)
+          end2 (loop [i end]
+                 (if (and (< i len) (word-delim? (str (aget text i))))
+                   (recur (inc i))
+                   i))]
+      [start end2])))
+
+(defn quote-range-inner [text pos qch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos)]
+                       (if (< i 0) nil
+                         (if (= (str (aget text i)) qch) i (recur (dec i)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos)]
+                          (if (>= i len) nil
+                            (if (= (str (aget text i)) qch) i (recur (inc i))))))]
+        (when (and open-pos close-pos)
+          [(inc open-pos) close-pos])))))
+
+(defn quote-range-a [text pos qch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos)]
+                       (if (< i 0) nil
+                         (if (= (str (aget text i)) qch) i (recur (dec i)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos)]
+                          (if (>= i len) nil
+                            (if (= (str (aget text i)) qch) i (recur (inc i))))))]
+        (when (and open-pos close-pos)
+          [open-pos (inc close-pos)])))))
+
+(defn bracket-range-inner [text pos open-ch close-ch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos) depth 1]
+                       (if (< i 0) nil
+                         (let [ch (str (aget text i))]
+                           (cond
+                             (= ch close-ch) (recur (dec i) (inc depth))
+                             (= ch open-ch)  (if (= depth 1) i (recur (dec i) (dec depth)))
+                             :else            (recur (dec i) depth)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos) depth 1]
+                          (if (>= i len) nil
+                            (let [ch (str (aget text i))]
+                              (cond
+                                (= ch open-ch)  (recur (inc i) (inc depth))
+                                (= ch close-ch) (if (= depth 1) i (recur (inc i) (dec depth)))
+                                :else            (recur (inc i) depth))))))]
+        (when (and open-pos close-pos)
+          [(inc open-pos) close-pos])))))
+
+(defn bracket-range-a [text pos open-ch close-ch]
+  (let [len (count text)]
+    (when (and (>= pos 0) (< pos len))
+      (let [open-pos (loop [i (dec pos) depth 1]
+                       (if (< i 0) nil
+                         (let [ch (str (aget text i))]
+                           (cond
+                             (= ch close-ch) (recur (dec i) (inc depth))
+                             (= ch open-ch)  (if (= depth 1) i (recur (dec i) (dec depth)))
+                             :else            (recur (dec i) depth)))))
+            close-pos (when open-pos
+                        (loop [i (inc pos) depth 1]
+                          (if (>= i len) nil
+                            (let [ch (str (aget text i))]
+                              (cond
+                                (= ch open-ch)  (recur (inc i) (inc depth))
+                                (= ch close-ch) (if (= depth 1) i (recur (inc i) (dec depth)))
+                                :else            (recur (inc i) depth))))))]
+        (when (and open-pos close-pos)
+          [open-pos (inc close-pos)])))))
+
+(defn get-object-range [text pos obj-key obj-type]
+  (let [inner? (= obj-type :inner)]
+    (case obj-key
+      "w" (if inner? (word-range-inner text pos) (word-range-a text pos))
+      ("\"" "'") (if inner? (quote-range-inner text pos obj-key) (quote-range-a text pos obj-key))
+      ("(" ")") (if inner? (bracket-range-inner text pos "(" ")") (bracket-range-a text pos "(" ")"))
+      ("[" "]") (if inner? (bracket-range-inner text pos "[" "]") (bracket-range-a text pos "[" "]"))
+      ("{" "}") (if inner? (bracket-range-inner text pos "{" "}") (bracket-range-a text pos "{" "}"))
+      ("<" ">") (if inner? (bracket-range-inner text pos "<" ">") (bracket-range-a text pos "<" ">"))
+      nil)))
+
+(defn execute-operator! [start end]
+  (let [txt (focused-text)
+        op @pending-operator
+        new-txt (str (subs txt 0 start) (subs txt end))
+        fid (focused)]
+    (set-text! fid new-txt)
+    (swap! app assoc :cursor-pos start)
+    (when (= op :c)
+      (set-mode! :insert))
+    (reset! pending-operator nil)
+    (reset! pending-object-type nil)
+    (render-all!)))
+
+;; ── Normal-mode cursor helpers (app state :cursor-pos) ──
+(defn focused-text []
+  (:text (node-at (focused)) ""))
+
+(defn cp [] (:cursor-pos @app 0))
+
+(defn cp-left! []
+  (swap! app update :cursor-pos #(max 0 (dec (or % 0)))))
+
+(defn cp-right! []
+  (let [txt (focused-text)]
+    (swap! app update :cursor-pos #(min (count txt) (inc (or % 0))))))
+
+(defn cp-word-forward! []
+  (let [txt (focused-text)
+        len (count txt)
+        pos (cp)
+        i (loop [i pos]
+            (if (and (< i len) (not (word-delim? (str (aget txt i)))))
+              (recur (inc i))
+              i))
+        j (loop [j i]
+            (if (and (< j len) (word-delim? (str (aget txt j))))
+              (recur (inc j))
+              j))]
+    (swap! app assoc :cursor-pos j)))
+
+(defn cp-word-backward! []
+  (let [txt (focused-text)
+        pos (cp)]
+    (if (<= pos 0)
+      (swap! app assoc :cursor-pos 0)
+      (loop [i (dec pos)]
+        (if (< i 0)
+          (swap! app assoc :cursor-pos 0)
+          (if (word-delim? (str (aget txt i)))
+            (recur (dec i))
+            (loop [j i]
+              (if (or (< j 0) (word-delim? (str (aget txt j))))
+                (swap! app assoc :cursor-pos (inc j))
+                (recur (dec j))))))))))
+
+(defn cp-word-end! []
+  (let [txt (focused-text)
+        len (count txt)
+        pos (cp)]
+    ;; Skip current word if on a word char, then skip whitespace, then skip next word to its end
+    (loop [i pos]
+      (cond
+        (>= i len) (swap! app assoc :cursor-pos (max 0 (dec len)))
+        (not (word-delim? (str (aget txt i)))) (recur (inc i))  ;; skip to end of current word
+        :else
+        ;; i is at whitespace, skip it, then skip next word to its end
+        (let [j (loop [k i]
+                  (if (and (< k len) (word-delim? (str (aget txt k))))
+                    (recur (inc k))
+                    k))]
+          (if (>= j len)
+            (swap! app assoc :cursor-pos (max 0 (dec len)))
+            (loop [m j]
+              (if (and (< (inc m) len) (not (word-delim? (str (aget txt (inc m))))))
+                (recur (inc m))
+                (swap! app assoc :cursor-pos m)))))))))
+
+(defn cp-delete-to-end! []
+  (let [txt (focused-text)
+        pos (cp)
+        new-txt (subs txt 0 pos)]
+    (set-text! (focused) new-txt)
+    (swap! app assoc :cursor-pos (count new-txt))))
+
+(defn cp-word-end-backward! []
+  (let [txt (focused-text)
+        pos (cp)]
+    (if (<= pos 0)
+      (swap! app assoc :cursor-pos 0)
+      ;; Go left to find end of previous word
+      (loop [i (dec pos)]
+        (cond
+          (< i 0) (swap! app assoc :cursor-pos 0)
+          (word-delim? (str (aget txt i))) (recur (dec i))  ;; skip whitespace backward
+          :else
+          ;; i is at last char of a word, go to start of that word, then forward to its end
+          (loop [j i]
+            (if (or (< j 0) (word-delim? (str (aget txt j))))
+              ;; j+1 is start of word, now find its end
+              (loop [k (inc j)]
+                (if (and (< (inc k) (count txt)) (not (word-delim? (str (aget txt (inc k))))))
+                  (recur (inc k))
+                  (swap! app assoc :cursor-pos k)))
+              (recur (dec j)))))))))
+
+(defn cp-find-char! [ch]
+  (let [txt (focused-text)
+        pos (cp)
+        next-idx (.indexOf txt ch (inc pos))]
+    (when (>= next-idx 0)
+      (swap! app assoc :cursor-pos next-idx))))
+
+(defn cp-till-char! [ch]
+  (let [txt (focused-text)
+        pos (cp)
+        next-idx (.indexOf txt ch (inc pos))]
+    (when (>= next-idx 0)
+      (swap! app assoc :cursor-pos (max 0 (dec next-idx))))))
+
+;; ── Cursor / Text Helpers (DOM, insert mode) ──
 
 (defn get-text-el []
   (let [active-el (.-activeElement js/document)]
@@ -525,9 +789,6 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
         (.removeAllRanges sel)
         (.addRange sel range)
         (.focus el)))))
-
-(defn word-delim? [ch]
-  (or (= ch " ") (= ch "\t") (= ch "\n")))
 
 (defn cursor-word-forward! [el]
   (when-let [pos (get-cursor-pos el)]
@@ -613,15 +874,25 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
         ctrl (.-ctrlKey e)
         m (mode)]
     
-    ;; Global: Escape
-    (when (= key "Escape")
+    ;; Global: Escape / Ctrl+[
+    (when (or (= key "Escape") (and ctrl (= key "[")))
       (.preventDefault e)
       (when (help?) (toggle-help!) (render-all!))
+      (reset! pending-operator nil)
+      (reset! pending-object-type nil)
       (when (= m :insert)
-        ;; Save current text before exiting insert mode
+        ;; Save current text AND cursor position before exiting insert mode
         (let [active-el (.-activeElement js/document)]
           (when (and active-el (.. active-el -classList (contains "text-node")))
-            (set-text! (focused) (.-textContent active-el))))
+            (set-text! (focused) (.-textContent active-el))
+            ;; Save cursor position from contentEditable
+            (let [sel (js/window.getSelection)]
+              (when (and sel (pos? (.-rangeCount sel)))
+                (let [rng (.getRangeAt sel 0)
+                      pre-rng (.createRange js/document)]
+                  (.setStart pre-rng active-el 0)
+                  (.setEnd pre-rng (.-startContainer rng) (.-startOffset rng))
+                  (swap! app assoc :cursor-pos (.-length (.toString pre-rng))))))))
         (set-mode! :normal)
         (render-all!))
       (js/clearTimeout @key-timer)
@@ -634,101 +905,157 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
       (toggle-help!)
       (render-all!))
     
+    ;; Global: gg / dd sequences (tracked via key-seq)
+    (when (= m :normal)
+      (let [s (.join (apply array (conj @key-seq key) ""))]
+        (when (= s "gg")
+          (.preventDefault e)
+          (nav-first)
+          (render-tree) (render-status-bar)
+          (reset! key-seq []))
+        (when (= s "dd")
+          (.preventDefault e)
+          (delete-node! (focused))
+          (render-all!)
+          (reset! key-seq []))))
+    
+    ;; Global: gg / dd (double-tap detection via last-key atom)
+    (when (= m :normal)
+      (when (and (= key "g") (= @last-key "g") (< (- (.now js/Date) @last-key-time) 800))
+        (.preventDefault e)
+        (nav-first)
+        (render-tree) (render-status-bar)
+        (reset! last-key nil) (reset! key-seq []))
+      (when (and (= key "d") (= @last-key "d") (< (- (.now js/Date) @last-key-time) 800))
+        (.preventDefault e)
+        (reset! op-suppress true)
+        (reset! pending-operator nil)
+        (delete-node! (focused))
+        (render-all!)
+        (reset! last-key nil) (reset! key-seq [])))
+    
     ;; Normal mode keys
     (when (= m :normal)
-      (let [seq-str (.join (apply array (conj @key-seq key) ""))]
-        (cond
-          (= key "j") (do (.preventDefault e) (nav-down) (render-tree) (render-status-bar) (reset! key-seq []))
+      (let [po @pending-operator
+            pot @pending-object-type
+            op-consumed (volatile! false)]
+        ;; ── Operator-pending intercept: i / a / object keys ──
+        (when po
+          (.preventDefault e)
+          (cond
+            ;; i → inner, a → around
+            (= key "i") (do (reset! pending-object-type :inner) (vreset! op-consumed true) (reset! key-seq []))
+            (= key "a") (do (reset! pending-object-type :a) (vreset! op-consumed true) (reset! key-seq []))
+            ;; object keys when pending-object-type is set
+            (and pot (contains? #{"w" "\"" "'" "(" ")" "[" "]" "{" "}" "<" ">"} key))
+            (let [txt (focused-text)
+                  pos (cp)
+                  rng (get-object-range txt pos key pot)]
+              (when rng
+                (execute-operator! (first rng) (second rng)))
+              (vreset! op-consumed true))
+            ;; any other key cancels operator (and consumes the key)
+            :else (do (reset! pending-operator nil) (reset! pending-object-type nil) (vreset! op-consumed true))))
+        ;; Only process normal mode keys if not consumed by operator
+        (when-not @op-consumed
+        (let [seq-str (.join (apply array (conj @key-seq key) ""))
+              pm @pending-motion]
           
-          (= key "k") (do (.preventDefault e) (nav-up) (render-tree) (render-status-bar) (reset! key-seq []))
-          
-          (= key "i") (do (.preventDefault e) (set-mode! :insert) (render-all!))
-          
-          (= key "o") (do (.preventDefault e)
-                          (let [f (focused)
-                                nid (add-child! f)]
-                            (set-mode! :insert)
-                            (render-all!)))
-          
-          (= key "O") (do (.preventDefault e)
-                          (let [f (focused)]
-                            (when (not= f "root")
-                              (let [nid (add-sibling-after! f)]
-                                (set-mode! :insert)
-                                (render-all!)))))
-          
-          (= key "h") (do (.preventDefault e) (collapse! (focused)) (render-tree) (render-status-bar))
-          
-          (= key "l") (do (.preventDefault e) (expand! (focused)) (render-tree) (render-status-bar))
-          
-          (= key "x") (do (.preventDefault e) (toggle-completed! (focused)) (render-tree) (render-status-bar))
-          
-          (= key ">") (do (.preventDefault e) (indent! (focused)) (render-tree) (render-status-bar))
-          
-          (= key "<") (do (.preventDefault e) (outdent! (focused)) (render-tree) (render-status-bar))
-          
-          (= key "G") (do (.preventDefault e) (nav-last) (render-tree) (render-status-bar) (reset! key-seq []))
-          
-          (= seq-str "gg") (do (.preventDefault e) (nav-first) (render-tree) (render-status-bar) (reset! key-seq []))
-          
-          (= seq-str "dd") (do (.preventDefault e) (delete-node! (focused)) (render-all!) (reset! key-seq []))
-          
-          ;; Otherwise track for multi-key sequences
-          (not (contains? #{"Shift" "Control" "Alt" "Meta" "Tab"} key))
-          (do
-            (swap! key-seq conj key)
-            (js/clearTimeout @key-timer)
-            (reset! key-timer (js/setTimeout (fn [] (reset! key-seq [])) 500))))))
-    
-    ;; ── Insert mode: word / character motions ──
-    (when (= m :insert)
-      (let [pm @pending-motion]
-        (cond
-          ;; Pending motion (f / t / g) — next key completes it
-          pm
-          (do
+          ;; Handle pending f/t/g motions
+          (when pm
             (.preventDefault e)
-            (when-let [el (get-text-el)]
-              (case (:type pm)
-                :f  (cursor-find-char! el key)
-                :t  (cursor-till-char! el key)
-                :g  (when (= key "e") (cursor-word-end-backward! el))
-                nil))
-            (reset! pending-motion nil))
-
-          ;; w → start of next word
-          (= key "w")
-          (do (.preventDefault e)
-              (when-let [el (get-text-el)] (cursor-word-forward! el)))
-
-          ;; b → start of previous word
-          (= key "b")
-          (do (.preventDefault e)
-              (when-let [el (get-text-el)] (cursor-word-backward! el)))
-
-          ;; e → end of current / next word
-          (= key "e")
-          (do (.preventDefault e)
-              (when-let [el (get-text-el)] (cursor-word-end! el)))
-
-          ;; f → find char (wait for next key)
-          (= key "f")
-          (do (.preventDefault e)
-              (reset! pending-motion {:type :f}))
-
-          ;; t → till char (wait for next key)
-          (= key "t")
-          (do (.preventDefault e)
-              (reset! pending-motion {:type :t}))
-
-          ;; g → wait for ge
-          (= key "g")
-          (do (.preventDefault e)
-              (reset! pending-motion {:type :g}))
-
-          :else nil)))
-
-    ;; Insert mode: Enter adds sibling
+            (case (:type pm)
+              :f (cp-find-char! key)
+              :t (cp-till-char! key)
+              :g (when (= key "e") (cp-word-end-backward!))
+              nil)
+            (reset! pending-motion nil)
+            (render-tree))
+          
+          ;; Handle f/t/g — set pending motion (only if no pending already, and not consumed by gg/dd)
+          (when (and (not pm) (not (contains? #{"gg" "dd"} seq-str)) (contains? #{"f" "t" "g"} key))
+            (.preventDefault e)
+            (reset! pending-motion {:type (case key "f" :f "t" :t "g" :g nil)})
+            (swap! key-seq conj key))
+          
+          ;; Handle other keys
+          (when (and (not pm) (not (contains? #{"f" "t" "g"} key)))
+          (cond
+            
+            ;; j/k: navigate rows
+            (= key "j") (do (.preventDefault e) (nav-down) (render-tree) (render-status-bar) (reset! key-seq []))
+            
+            (= key "k") (do (.preventDefault e) (nav-up) (render-tree) (render-status-bar) (reset! key-seq []))
+            
+            ;; c: change operator
+            (= key "c") (do (.preventDefault e) (reset! pending-operator :c) (reset! pending-object-type nil) (reset! key-seq []))
+            
+            ;; d: delete operator (but NOT if dd just fired)
+            (= key "d") (do
+                          (.preventDefault e)
+                          (if @op-suppress
+                            (reset! op-suppress false)
+                            (do (reset! pending-operator :d) (reset! pending-object-type nil)))
+                          (reset! key-seq []))
+            
+            ;; i: enter insert mode
+            (= key "i") (do (.preventDefault e) (set-mode! :insert) (render-all!))
+            
+            ;; a: append (cursor right, then insert)
+            (= key "a") (do (.preventDefault e) (cp-right!) (set-mode! :insert) (render-all!))
+            
+            ;; $: go to end of line
+            (= key "$") (do (.preventDefault e) (let [txt (focused-text)] (swap! app assoc :cursor-pos (count txt))) (render-tree) (reset! key-seq []))
+            
+            ;; o: add child and enter insert
+            (= key "o") (do (.preventDefault e)
+                            (let [f (focused)
+                                  nid (add-child! f)]
+                              (set-mode! :insert)
+                              (render-all!)))
+            
+            ;; O: add sibling above and enter insert
+            (= key "O") (do (.preventDefault e)
+                            (let [f (focused)]
+                              (when (not= f "root")
+                                (let [nid (add-sibling-after! f)]
+                                  (set-mode! :insert)
+                                  (render-all!)))))
+            
+            ;; h/l: cursor left/right
+            (= key "h") (do (.preventDefault e) (cp-left!) (render-tree) (reset! key-seq []))
+            (= key "l") (do (.preventDefault e) (cp-right!) (render-tree) (reset! key-seq []))
+            
+            ;; w/b/e: word motions
+            (= key "w") (do (.preventDefault e) (cp-word-forward!) (render-tree) (reset! key-seq []))
+            (= key "b") (do (.preventDefault e) (cp-word-backward!) (render-tree) (reset! key-seq []))
+            (= key "e") (do (.preventDefault e) (cp-word-end!) (render-tree) (reset! key-seq []))
+            
+            ;; D: delete to end of line
+            (= key "D") (do (.preventDefault e) (cp-delete-to-end!) (render-tree) (reset! key-seq []))
+            
+            ;; x: toggle complete
+            (= key "x") (do (.preventDefault e) (toggle-completed! (focused)) (render-tree) (render-status-bar))
+            
+            ;; >/<: indent/outdent
+            (= key ">") (do (.preventDefault e) (indent! (focused)) (render-tree) (render-status-bar))
+            (= key "<") (do (.preventDefault e) (outdent! (focused)) (render-tree) (render-status-bar))
+            
+            ;; G: go to last
+            (= key "G") (do (.preventDefault e) (nav-last) (render-tree) (render-status-bar) (reset! key-seq []))
+            
+            ;; Otherwise track for multi-key sequences
+            (not (contains? #{"Shift" "Control" "Alt" "Meta" "Tab" "Escape"} key))
+            (do
+              (swap! key-seq conj key)
+              (js/clearTimeout @key-timer)
+              (reset! key-timer (js/setTimeout (fn [] (reset! key-seq [])) 500)))))))))
+    
+    ;; ── Track last key for double-tap detection ──
+    (reset! last-key-time (.now js/Date))
+    (reset! last-key key)
+    
+    ;; ── Insert mode: no word motions (only Enter for new sibling) ──
     (when (and (= m :insert) (= key "Enter") (not ctrl))
       (.preventDefault e)
       ;; Save current text before adding sibling
@@ -746,15 +1073,15 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
     (when row
       (let [id (.getAttribute row "data-id")]
         (when id
-          (focus! id)
-          ;; If clicking the text area, enter insert mode
-          (when (or (.matches target ".text-node")
-                    (.matches target ".node-row"))
-            (set-mode! :insert)
-            (render-all!))
-          (when (not (or (.matches target ".text-node")
-                         (.matches target ".node-row")))
-            (render-all!)))))))
+          ;; If already focused in insert mode, let browser handle the click
+          (if (and (= id (focused)) (= (mode) :insert))
+            nil
+            (do
+              (focus! id)
+              (when (or (.matches target ".text-node")
+                        (.matches target ".node-row"))
+                (set-mode! :insert))
+              (render-all!))))))))
 
 ;; ── OneDrive Integration ──
 (def one-drive-client-id "00000000-0000-0000-0000-000000000000") ;; placeholder
@@ -814,7 +1141,8 @@ body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', '
                            gc {:id gc :text "Try j/k to navigate, o to add" :parent c1 :children [] :collapsed false :completed false}}
                    :focused root-id
                    :mode :normal
-                   :help false})))
+                   :help false
+                   :cursor-pos 0})))
   ;; Event listeners
   (.addEventListener js/document "keydown" handle-key)
   (.addEventListener js/document "click" handle-click)
