@@ -580,11 +580,11 @@
   "Generate an HTML preview of the entire tree and open in a new window."
   (let [nodes (:nodes @app)
         body-html (tree->html nodes "root")
-        full-html (str "<!DOCTYPE html>\n<html><head><meta charset='UTF-8'><title>Vimflowy Preview</title><style>"
-                       "body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px 32px;line-height:1.8;color:#1a1a1a;background:#faf9f6;max-width:720px;margin:0 auto;}"
-                       "ul{list-style-type:none;padding-left:24px;margin:0;}"
-                       "li{padding:2px 0;}"
-                       ".done{text-decoration:line-through;color:#999;}"
+        full-html (str "<!DOCTYPE html>\n<html><head><meta charset='UTF-8'><title>flowvi</title><style>"
+                       "body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:24px 32px;line-height:1.8;color:#1a1a1a;background:#faf9f6;max-width:720px;margin:0 auto}"
+                       "ul{list-style-type:none;padding-left:24px;margin:0}"
+                       "li{padding:2px 0}"
+                       ".done{text-decoration:line-through;color:#999}"
                        "</style></head><body><ul>" body-html "</ul></body></html>")
         blob (js/Blob. #js[full-html] #js{:type "text/html"})
         url (.createObjectURL js/URL blob)]
