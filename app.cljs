@@ -568,13 +568,21 @@
                          (.replace ">" "&gt;")
                          (.replace "\"" "&quot;")
                          (.replace "'" "&#39;"))]
-    (str "<li" done-class ">" escaped-text
-         (when (seq children)
-           (str "<ul>"
-                (apply str (for [child-id children]
-                             (tree->html nodes child-id)))
-                "</ul>"))
-         "</li>")))
+    (if (= node-id "root")
+      ;; Root: just render children (skip root text), reverse for visual order
+      (when (seq children)
+        (str "<ul>"
+             (apply str (for [child-id (reverse children)]
+                          (tree->html nodes child-id)))
+             "</ul>"))
+      ;; Non-root: render text + children, reverse for visual order
+      (str "<li" done-class ">" escaped-text
+           (when (seq children)
+             (str "<ul>"
+                  (apply str (for [child-id (reverse children)]
+                               (tree->html nodes child-id)))
+                  "</ul>"))
+           "</li>"))))
 
 (defn preview-html! []
   "Generate an HTML preview of the entire tree and open in a new window."
