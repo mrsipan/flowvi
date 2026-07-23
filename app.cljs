@@ -166,9 +166,9 @@
                      (-> st
                          (update :nodes #(apply dissoc % (all-ids id)))
                          (update-in [:nodes p :children] (fn [chs] (vec (remove #(= % id) chs))))))))
-      ;; Focus on next sibling to keep cursor at same position
-      ;; Fall back to previous sibling, then parent, then root
-      (focus! (or next-sib prev-sib (parent-of id) "root")))))
+      ;; Focus on visual next (data prev) to keep cursor at same position
+      ;; Fall back to visual previous (data next), then parent, then root
+      (focus! (or prev-sib next-sib (parent-of id) "root")))))
 
 (defn indent! [id]
   (push-undo!)
@@ -245,8 +245,39 @@
   (let [style (.createElement js/document "style")]
     (set! (.-textContent style)
           (str
-           "* { box-sizing: border-box; margin: 0; padding: 0; }"
-           "body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1a1a1a; font-size: 14px; overflow: hidden; height: 100vh; }"
+           "@font-face{font-family:JuliaMono;src:url(JuliaMonoSiesta-Regular.woff2) format(woff2)}"
+           "*{box-sizing:border-box;margin:0;padding:0}"
+           "body{font-family:JuliaMono,SF Mono,Consolas,monospace;background:#e8e5df;color:#1a1a1a;font-size:14px;overflow:hidden;height:100vh}"
+           "#app { display: flex; flex-direction: column; height: 100vh; max-width: 800px; margin: 0 auto; background: #faf9f6; box-shadow: 0 0 40px rgba(0,0,0,0.08); }"
+           ".toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 20px; background: #fff; border-bottom: 1px solid #e0dcd5; flex-shrink: 0; }"
+           ".toolbar button { background: #f5f3ef; color: #444; border: 1px solid #d5d0c8; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; }"
+           ".toolbar button:hover { background: #e8e4dc; border-color: #b8b0a4; }"
+           ".mode-indicator { font-weight: 600; padding: 3px 10px; border-radius: 5px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }"
+           ".mode-normal { background: #e3f0ff; color: #1a6fc4; }"
+           ".mode-insert { background: #e6f5e6; color: #2d8040; }"
+           ".tree-container { flex: 1; overflow-y: auto; padding: 16px 0; }"
+           ".node-row { display: flex; align-items: center; cursor: pointer; padding: 3px 12px; border-left: 3px solid transparent; min-height: 30px; }"
+           ".node-row:hover { background: rgba(0,0,0,0.03); }"
+           ".node-row.focused { background: rgba(26,111,196,0.06); border-left-color: #1a6fc4; }"
+           ".bullet { width: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 12px; user-select: none; }"
+           ".bullet.expanded::before { content: '▾'; color: #666; }"
+           ".bullet.collapsed::before { content: '▸'; color: #999; }"
+           ".bullet.leaf::before { content: '•'; color: #bbb; }"
+           ".bullet.completed::before { content: '✓'; color: #4caf50; }"
+           ".text-node { flex: 1; outline: none; white-space: pre-wrap; word-break: break-word; padding: 2px 6px; border-radius: 3px; line-height: 1.5; }"
+           ".text-node.completed { text-decoration: line-through; color: #aaa; }"
+           ".text-node[contenteditable='true'] { background: rgba(26,111,196,0.04); cursor: text; border-radius: 4px; }"
+           ".cursor-block { background: #1a6fc4; color: #fff; font-weight: 600; border-radius: 2px; }"
+           ".status-bar { display: none; }"
+           ".help-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }"
+           ".help-box { background: #fff; border: 1px solid #d5d0c8; border-radius: 12px; padding: 24px; max-width: 500px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); }"
+           ".help-box h2 { color: #1a1a1a; margin-bottom: 16px; font-size: 16px; }"
+           ".help-box kbd { background: #f5f3ef; border: 1px solid #d5d0c8; padding: 2px 6px; border-radius: 4px; font-family: SF Mono, Consolas, monospace; font-size: 11px; margin-right: 8px; }"
+           ".help-box .help-row { margin-bottom: 4px; color: #444; }"
+           ".help-box .help-section { margin-bottom: 12px; }"
+           ".help-box .help-section h3 { color: #888; font-size: 11px; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }"
+           ))
+    (.appendChild (.-head js/document) style)))
 
 (defn node-depth [id]
   (loop [n id d 0]
@@ -943,6 +974,13 @@
     (when (and @pending-op (= m :normal) (not (contains? #{"c" "d" "i" "w"} key)))
       (reset! pending-op nil))
     
+    ;; Global: Ctrl+O in normal mode = create child + insert
+    (when (and (= m :normal) ctrl (= key "o"))
+      (.preventDefault e)
+      (add-child! (focused))
+      (set-mode! :insert)
+      (render-all!))
+    
     ;; Normal mode keys (skip if ciw/diw just consumed the key)
     (when (and (= m :normal) (not (identical? @pending-op :consumed)))
       (let [seq-str (.join (apply array (conj @key-seq key) ""))
@@ -985,10 +1023,10 @@
             
             ;; o: add child and enter insert
             ;; o: add sibling below, stay in NORMAL
-            (= key "o") (do (.preventDefault e) (add-sibling-below! (focused)) (render-all!) (reset! key-seq []))
+            (= key "o") (if ctrl nil (do (.preventDefault e) (add-sibling-below! (focused)) (render-all!) (reset! key-seq [])))
             
             ;; O: add sibling above, stay in NORMAL
-            (= key "O") (do (.preventDefault e) (when (not= (focused) "root") (add-sibling-above! (focused)) (render-all!)) (reset! key-seq []))
+            (= key "O") (if ctrl nil (do (.preventDefault e) (when (not= (focused) "root") (add-sibling-above! (focused)) (render-all!)) (reset! key-seq [])))
             
             ;; h/l: cursor left/right
             (= key "h") (do (.preventDefault e) (cp-left!) (render-tree) (reset! key-seq []))

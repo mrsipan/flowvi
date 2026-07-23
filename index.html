@@ -9,8 +9,36 @@
 </script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1a1a1a; overflow: hidden; height: 100vh; }
-#app { height: 100vh; min-height: 100vh; }
+body { background: #1e1e1e; color: #d4d4d4; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; height: 100vh; overflow: hidden; }
+#app { height: 100vh; }
+.vim-container { display: flex; height: 100vh; width: 100%; }
+.vim-left { flex: 0 0 60%; display: flex; flex-direction: column; border-right: 2px solid #333; }
+.vim-right { flex: 1; display: flex; flex-direction: column; }
+.vim-header { padding: 8px 12px; background: #2d2d2d; border-bottom: 1px solid #444; font-weight: bold; font-size: 14px; color: #888; }
+.vim-editor { flex: 1; padding: 12px; overflow-y: auto; font-size: 16px; line-height: 1.6; outline: none; white-space: pre; cursor: text; }
+.vim-line { min-height: 1.6em; }
+.vim-current-line { background: #2a2a2a; }
+.vim-cursor-block { display: inline; background: #d4d4d4; color: #1e1e1e; }
+.vim-cursor-line { display: inline; background: transparent; color: #d4d4d4; font-weight: bold; animation: blink 1s step-end infinite; }
+.vim-visual-block { background: #569cd6; color: #ffffff; }
+@keyframes blink { 50% { opacity: 0; } }
+.vim-statusbar { padding: 6px 12px; background: #2d2d2d; border-top: 1px solid #444; font-size: 13px; color: #aaa; }
+.vim-mode-normal { font-weight: bold; color: #569cd6; }
+.vim-mode-insert { font-weight: bold; color: #4ec9b0; }
+.vim-mode-command { font-weight: bold; color: #ce9178; }
+.vim-mode-visual { font-weight: bold; color: #c586c0; }
+.vim-msg { color: #ce9178; font-style: italic; }
+.org-preview { flex: 1; padding: 12px; overflow-y: auto; font-size: 15px; line-height: 1.6; }
+.org-preview h1, .org-preview h2, .org-preview h3, .org-preview h4 { color: #569cd6; margin: 12px 0 6px; }
+.org-preview h1 { font-size: 1.4em; }
+.org-preview h2 { font-size: 1.2em; }
+.org-preview h3 { font-size: 1.1em; }
+.org-preview p { margin: 6px 0; }
+.org-preview ul { margin: 6px 0 6px 20px; }
+.org-preview li { margin: 3px 0; }
+.org-preview em { color: #ce9178; }
+.org-preview strong { color: #dcdcaa; }
+.org-preview code { background: #2d2d2d; padding: 1px 4px; border-radius: 3px; color: #ce9178; }
 </style>
 </head>
 <body>
@@ -185,9 +213,9 @@ body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1
                      (-> st
                          (update :nodes #(apply dissoc % (all-ids id)))
                          (update-in [:nodes p :children] (fn [chs] (vec (remove #(= % id) chs))))))))
-      ;; Focus on next sibling to keep cursor at same position
-      ;; Fall back to previous sibling, then parent, then root
-      (focus! (or next-sib prev-sib (parent-of id) "root")))))
+      ;; Focus on visual next (data prev) to keep cursor at same position
+      ;; Fall back to visual previous (data next), then parent, then root
+      (focus! (or prev-sib next-sib (parent-of id) "root")))))
 
 (defn indent! [id]
   (push-undo!)
@@ -264,8 +292,39 @@ body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1
   (let [style (.createElement js/document "style")]
     (set! (.-textContent style)
           (str
-           "* { box-sizing: border-box; margin: 0; padding: 0; }"
-           "body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1a1a1a; font-size: 14px; overflow: hidden; height: 100vh; }"
+           "@font-face{font-family:JuliaMono;src:url(JuliaMonoSiesta-Regular.woff2) format(woff2)}"
+           "*{box-sizing:border-box;margin:0;padding:0}"
+           "body{font-family:JuliaMono,SF Mono,Consolas,monospace;background:#e8e5df;color:#1a1a1a;font-size:14px;overflow:hidden;height:100vh}"
+           "#app { display: flex; flex-direction: column; height: 100vh; max-width: 800px; margin: 0 auto; background: #faf9f6; box-shadow: 0 0 40px rgba(0,0,0,0.08); }"
+           ".toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 20px; background: #fff; border-bottom: 1px solid #e0dcd5; flex-shrink: 0; }"
+           ".toolbar button { background: #f5f3ef; color: #444; border: 1px solid #d5d0c8; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; }"
+           ".toolbar button:hover { background: #e8e4dc; border-color: #b8b0a4; }"
+           ".mode-indicator { font-weight: 600; padding: 3px 10px; border-radius: 5px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }"
+           ".mode-normal { background: #e3f0ff; color: #1a6fc4; }"
+           ".mode-insert { background: #e6f5e6; color: #2d8040; }"
+           ".tree-container { flex: 1; overflow-y: auto; padding: 16px 0; }"
+           ".node-row { display: flex; align-items: center; cursor: pointer; padding: 3px 12px; border-left: 3px solid transparent; min-height: 30px; }"
+           ".node-row:hover { background: rgba(0,0,0,0.03); }"
+           ".node-row.focused { background: rgba(26,111,196,0.06); border-left-color: #1a6fc4; }"
+           ".bullet { width: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #aaa; font-size: 12px; user-select: none; }"
+           ".bullet.expanded::before { content: '▾'; color: #666; }"
+           ".bullet.collapsed::before { content: '▸'; color: #999; }"
+           ".bullet.leaf::before { content: '•'; color: #bbb; }"
+           ".bullet.completed::before { content: '✓'; color: #4caf50; }"
+           ".text-node { flex: 1; outline: none; white-space: pre-wrap; word-break: break-word; padding: 2px 6px; border-radius: 3px; line-height: 1.5; }"
+           ".text-node.completed { text-decoration: line-through; color: #aaa; }"
+           ".text-node[contenteditable='true'] { background: rgba(26,111,196,0.04); cursor: text; border-radius: 4px; }"
+           ".cursor-block { background: #1a6fc4; color: #fff; font-weight: 600; border-radius: 2px; }"
+           ".status-bar { display: none; }"
+           ".help-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }"
+           ".help-box { background: #fff; border: 1px solid #d5d0c8; border-radius: 12px; padding: 24px; max-width: 500px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); }"
+           ".help-box h2 { color: #1a1a1a; margin-bottom: 16px; font-size: 16px; }"
+           ".help-box kbd { background: #f5f3ef; border: 1px solid #d5d0c8; padding: 2px 6px; border-radius: 4px; font-family: SF Mono, Consolas, monospace; font-size: 11px; margin-right: 8px; }"
+           ".help-box .help-row { margin-bottom: 4px; color: #444; }"
+           ".help-box .help-section { margin-bottom: 12px; }"
+           ".help-box .help-section h3 { color: #888; font-size: 11px; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }"
+           ))
+    (.appendChild (.-head js/document) style)))
 
 (defn node-depth [id]
   (loop [n id d 0]
@@ -962,6 +1021,13 @@ body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1
     (when (and @pending-op (= m :normal) (not (contains? #{"c" "d" "i" "w"} key)))
       (reset! pending-op nil))
     
+    ;; Global: Ctrl+O in normal mode = create child + insert
+    (when (and (= m :normal) ctrl (= key "o"))
+      (.preventDefault e)
+      (add-child! (focused))
+      (set-mode! :insert)
+      (render-all!))
+    
     ;; Normal mode keys (skip if ciw/diw just consumed the key)
     (when (and (= m :normal) (not (identical? @pending-op :consumed)))
       (let [seq-str (.join (apply array (conj @key-seq key) ""))
@@ -1004,10 +1070,10 @@ body { font-family: SF Mono, Consolas, monospace; background: #e8e5df; color: #1
             
             ;; o: add child and enter insert
             ;; o: add sibling below, stay in NORMAL
-            (= key "o") (do (.preventDefault e) (add-sibling-below! (focused)) (render-all!) (reset! key-seq []))
+            (= key "o") (if ctrl nil (do (.preventDefault e) (add-sibling-below! (focused)) (render-all!) (reset! key-seq [])))
             
             ;; O: add sibling above, stay in NORMAL
-            (= key "O") (do (.preventDefault e) (when (not= (focused) "root") (add-sibling-above! (focused)) (render-all!)) (reset! key-seq []))
+            (= key "O") (if ctrl nil (do (.preventDefault e) (when (not= (focused) "root") (add-sibling-above! (focused)) (render-all!)) (reset! key-seq [])))
             
             ;; h/l: cursor left/right
             (= key "h") (do (.preventDefault e) (cp-left!) (render-tree) (reset! key-seq []))
