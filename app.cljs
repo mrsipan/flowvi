@@ -5,8 +5,13 @@
 ;; ── Utils ──
 (defn gen-id [] (str "n" (random-uuid)))
 
-;; ── Global State ──
+;; ── Global State & Config ──
 (defonce app (atom nil))
+
+(def client-id-key "vimflowy-onedrive-client-id")
+(defonce one-drive-client-id (atom (.getItem js/localStorage client-id-key)))
+(defonce one-drive-token (atom nil))
+(def one-drive-redirect-uri (.-href (.-location js/window)))
 
 (defn nodes [] (:nodes @app))
 (defn focused [] (:focused @app))
@@ -302,7 +307,7 @@
     (.setAttribute row "data-id" id)
     (set! (.-className row) (str "node-row" (when is-focused " focused")))
     (set! (.. row -style -paddingLeft) (str (* d 20) "px"))
-    
+
     ;; Bullet
     (let [bullet (.createElement js/document "span")]
       (set! (.-className bullet)
@@ -312,7 +317,7 @@
                        is-collapsed "collapsed"
                        :else "expanded")))
       (.appendChild row bullet))
-    
+
     ;; Text
     (let [text-el (.createElement js/document "span")]
       (set! (.-className text-el) (str "text-node" (when completed " completed")))
@@ -357,19 +362,19 @@
     (when existing (.remove existing)))
   (let [tb (.createElement js/document "div")]
     (.setAttribute tb "class" "toolbar")
-    
+
     ;; Mode indicator
     (let [mi (.createElement js/document "span")]
       (set! (.-className mi) (str "mode-indicator " (if (= (mode) :insert) "mode-insert" "mode-normal")))
       (set! (.-textContent mi) (if (= (mode) :insert) "INSERT" "NORMAL"))
       (.appendChild tb mi))
-    
+
     ;; Save button
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "💾 Save")
       (.addEventListener btn "click" (fn [_] (save-local)))
       (.appendChild tb btn))
-    
+
     ;; Export button
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "📤 Export")
@@ -384,7 +389,7 @@
                              (.click a)
                              (.revokeObjectURL js/URL url))))
       (.appendChild tb btn))
-    
+
     ;; Import button
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "📥 Import")
@@ -410,30 +415,51 @@
                                                         (.readAsText reader))))))
                              (.click inp))))
       (.appendChild tb btn))
-    
-    ;; OneDrive buttons
+
+    ;; OneDrive Save button
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "☁️ OneDrive Save")
       (.addEventListener btn "click" one-drive-save)
       (.appendChild tb btn))
-    
+
+    ;; OneDrive Load button
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "☁️ OneDrive Load")
       (.addEventListener btn "click" one-drive-load)
       (.appendChild tb btn))
-    
+
+    ;; OneDrive Config button
+    (let [btn (.createElement js/document "button")]
+      (set! (.-textContent btn) "⚙️ OneDrive Config")
+      (.addEventListener btn "click"
+        (fn [_]
+          (let [current (or @one-drive-client-id "")
+                new-cid (js/prompt "Update your OneDrive Client ID (leave blank to clear):" current)]
+            (when (some? new-cid) ;; User didn't click Cancel
+              (if (empty? new-cid)
+                (do
+                  (.removeItem js/localStorage client-id-key)
+                  (reset! one-drive-client-id nil)
+                  (reset! one-drive-token nil)
+                  (js/alert "OneDrive configuration cleared."))
+                (do
+                  (.setItem js/localStorage client-id-key new-cid)
+                  (reset! one-drive-client-id new-cid)
+                  (js/alert "OneDrive Client ID updated!")))))))
+      (.appendChild tb btn))
+
     ;; Help
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "? Help")
       (.addEventListener btn "click" (fn [_] (toggle-help!) (render-all!)))
       (.appendChild tb btn))
-    
+
     ;; Preview
     (let [btn (.createElement js/document "button")]
       (set! (.-textContent btn) "👁 Preview")
       (.addEventListener btn "click" (fn [_] (preview-html!)))
       (.appendChild tb btn))
-    
+
     (.appendChild app-el tb)))
 
 (defn render-status-bar [])
@@ -662,7 +688,7 @@
                            (cond
                              (= ch close-ch) (recur (dec i) (inc depth))
                              (= ch open-ch)  (if (= depth 1) i (recur (dec i) (dec depth)))
-                             :else            (recur (dec i) depth)))))
+                             :else           (recur (dec i) depth)))))
             close-pos (when open-pos
                         (loop [i (inc pos) depth 1]
                           (if (>= i len) nil
@@ -670,7 +696,7 @@
                               (cond
                                 (= ch open-ch)  (recur (inc i) (inc depth))
                                 (= ch close-ch) (if (= depth 1) i (recur (inc i) (dec depth)))
-                                :else            (recur (inc i) depth))))))]
+                                :else           (recur (inc i) depth))))))]
         (when (and open-pos close-pos)
           [(inc open-pos) close-pos])))))
 
@@ -683,7 +709,7 @@
                            (cond
                              (= ch close-ch) (recur (dec i) (inc depth))
                              (= ch open-ch)  (if (= depth 1) i (recur (dec i) (dec depth)))
-                             :else            (recur (dec i) depth)))))
+                             :else           (recur (dec i) depth)))))
             close-pos (when open-pos
                         (loop [i (inc pos) depth 1]
                           (if (>= i len) nil
@@ -691,7 +717,7 @@
                               (cond
                                 (= ch open-ch)  (recur (inc i) (inc depth))
                                 (= ch close-ch) (if (= depth 1) i (recur (inc i) (dec depth)))
-                                :else            (recur (inc i) depth))))))]
+                                :else           (recur (inc i) depth))))))]
         (when (and open-pos close-pos)
           [open-pos (inc close-pos)])))))
 
@@ -956,7 +982,7 @@
   (let [key (.-key e)
         ctrl (.-ctrlKey e)
         m (mode)]
-    
+
     ;; Global: Escape / Ctrl+[
     (when (or (= key "Escape") (and ctrl (= key "[")))
       (.preventDefault e)
@@ -982,22 +1008,22 @@
       (js/clearTimeout @key-timer)
       (reset! key-seq [])
       (when (not= m :normal) (render-all!)))
-    
+
     ;; Cancel pending-op on Escape (already handled above via key reset)
-    
+
     ;; Global: Ctrl+O in normal mode = create child + insert
     (when (and (= m :normal) ctrl (= key "o"))
       (.preventDefault e)
       (add-child! (focused))
       (set-mode! :insert)
       (render-all!))
-    
+
     ;; Global: ? toggles help
     (when (and (= key "?") (not ctrl) (= m :normal) (not (help?)))
       (.preventDefault e)
       (toggle-help!)
       (render-all!))
-    
+
     ;; Global: gg / dd (double-tap detection via last-key atom)
     (when (= m :normal)
       (when (and (= key "g") (= @last-key "g") (< (- (.now js/Date) @last-key-time) 800))
@@ -1010,7 +1036,7 @@
         (delete-node! (focused))
         (render-all!)
         (reset! last-key nil) (reset! key-seq [])))
-    
+
     ;; Global: ciw / diw / cw / dw
     (when (= m :normal)
       (let [po @pending-op
@@ -1036,19 +1062,19 @@
                         (when r (execute-op! (:op po) (first r) (second r))))
                       (reset! pending-op :consumed))
                   nil)))))))
-    
+
     ;; Skip normal handler if ciw/diw just executed (keep flag for check below)
     (when (identical? @pending-op :consumed) nil)
-    
+
     ;; Cancel pending-op on Escape or any non-ciw key
     (when (and @pending-op (= m :normal) (not (contains? #{"c" "d" "i" "w"} key)))
       (reset! pending-op nil))
-    
+
     ;; Normal mode keys (skip if ciw/diw just consumed the key)
     (when (and (= m :normal) (not (identical? @pending-op :consumed)))
       (let [seq-str (.join (apply array (conj @key-seq key) ""))
             pm @pending-motion]
-        
+
         ;; Handle pending f/t/g motions
         (when pm
             (.preventDefault e)
@@ -1059,78 +1085,78 @@
               nil)
             (reset! pending-motion nil)
             (render-tree))
-          
+
           ;; Handle f/t/g — set pending motion (only if no pending already, and not consumed by gg/dd)
           (when (and (not pm) (not (contains? #{"gg" "dd"} seq-str)) (contains? #{"f" "t" "g"} key))
             (.preventDefault e)
             (reset! pending-motion {:type (case key "f" :f "t" :t "g" :g nil)})
             (swap! key-seq conj key))
-          
+
           ;; Handle other keys
           (when (and (not pm) (not (contains? #{"f" "t" "g"} key)))
           (cond
-            
+
             ;; j/k: navigate rows
             (= key "j") (do (.preventDefault e) (nav-down) (render-tree) (render-status-bar) (reset! key-seq []))
-            
+
             (= key "k") (do (.preventDefault e) (nav-up) (render-tree) (render-status-bar) (reset! key-seq []))
-            
+
             ;; i: enter insert mode (skip if ciw/diw pending)
             (= key "i") (if @pending-op nil (do (.preventDefault e) (set-mode! :insert) (render-all!)))
-            
+
             ;; a: append
             (= key "a") (if @pending-op nil (do (.preventDefault e) (cp-right!) (set-mode! :insert) (render-all!)))
-            
+
             ;; $: go to end of line
             (= key "$") (do (.preventDefault e) (let [txt (focused-text)] (swap! app assoc :cursor-pos (count txt))) (render-tree) (reset! key-seq []))
-            
+
             ;; o: add child and enter insert
             ;; o: add sibling below, stay in NORMAL
             (= key "o") (if ctrl nil (do (.preventDefault e) (add-sibling-below! (focused)) (set-mode! :insert) (render-all!) (reset! key-seq [])))
-            
+
             ;; O: add sibling above, stay in NORMAL
             (= key "O") (if ctrl nil (do (.preventDefault e) (when (not= (focused) "root") (add-sibling-above! (focused)) (set-mode! :insert) (render-all!)) (reset! key-seq [])))
-            
+
             ;; h/l: cursor left/right
             (= key "h") (do (.preventDefault e) (cp-left!) (render-tree) (reset! key-seq []))
             (= key "l") (do (.preventDefault e) (cp-right!) (render-tree) (reset! key-seq []))
-            
+
             ;; w/b/e: word motions
             (= key "w") (do (.preventDefault e) (cp-word-forward!) (render-tree) (reset! key-seq []))
             (= key "b") (do (.preventDefault e) (cp-word-backward!) (render-tree) (reset! key-seq []))
             (= key "e") (do (.preventDefault e) (cp-word-end!) (render-tree) (reset! key-seq []))
-            
+
             ;; D: delete to end of line
             (= key "D") (do (.preventDefault e) (cp-delete-to-end!) (render-tree) (reset! key-seq []))
-            
+
             ;; x: toggle complete
             (= key "x") (do (.preventDefault e) (toggle-completed! (focused)) (render-tree) (render-status-bar))
-            
+
             ;; >/<: indent/outdent
             (= key ">") (do (.preventDefault e) (indent! (focused)) (render-tree) (render-status-bar))
             (= key "<") (do (.preventDefault e) (outdent! (focused)) (render-tree) (render-status-bar))
-            
+
             ;; G: go to last
             (= key "G") (do (.preventDefault e) (nav-last) (render-tree) (render-status-bar) (reset! key-seq []))
-            
+
             ;; u: undo
             (= key "u") (do (.preventDefault e) (undo!) (reset! key-seq []))
-            
+
             ;; Ctrl+R: redo
             (and ctrl (= key "r")) (do (.preventDefault e) (redo!))
-            
+
             ;; Otherwise track for multi-key sequences
             (not (contains? #{"Shift" "Control" "Alt" "Meta" "Tab" "Escape"} key))
             (do
               (swap! key-seq conj key)
               (js/clearTimeout @key-timer)
               (reset! key-timer (js/setTimeout (fn [] (reset! key-seq [])) 500)))))))
-    
+
     ;; ── Track last key for double-tap detection ──
     (when (identical? @pending-op :consumed) (reset! pending-op nil))
     (reset! last-key-time (.now js/Date))
     (reset! last-key key)
-    
+
     ;; ── Insert mode: Ctrl+W delete word backward (chainable) ──
     (when (and (= m :insert) ctrl (= key "w"))
       (.preventDefault e)
@@ -1161,7 +1187,7 @@
                     (.collapse r2 true)
                     (.removeAllRanges sel)
                     (.addRange sel r2)))))))))
-    
+
     ;; ── Insert mode: Shift+Enter creates child node ──
     (when (and (= m :insert) (= key "Enter") (.-shiftKey e))
       (.preventDefault e)
@@ -1170,7 +1196,7 @@
           (set-text! (focused) (.-textContent active-el))))
       (add-child! (focused))
       (render-all!))
-    
+
     ;; ── Insert mode: Enter for new sibling ──
     (when (and (= m :insert) (= key "Enter") (not ctrl) (not (.-shiftKey e)))
       (.preventDefault e)
@@ -1200,37 +1226,72 @@
               (render-all!))))))))
 
 ;; ── OneDrive Integration ──
-(def one-drive-client-id "00000000-0000-0000-0000-000000000000") ;; placeholder
-(def one-drive-token (atom nil))
+(defn parse-hash-token []
+  "Extracts the OAuth access token from the URL hash after Microsoft redirects back."
+  (let [hash (.-hash js/window.location)]
+    (when (seq hash)
+      (let [params (js/URLSearchParams. (subs hash 1))
+            token (.get params "access_token")]
+        (when token
+          (reset! one-drive-token token)
+          (.replaceState js/window.history nil "" (.-pathname js/window.location)))))))
 
 (defn one-drive-auth []
-  (js/alert "OneDrive: Configure your client-id in the source (one-drive-client-id) and set redirect URI to this page."))
+  ;; Check if we have it, otherwise prompt the user
+  (let [cid (or @one-drive-client-id
+                (let [input (js/prompt "To use OneDrive, enter your Azure App Client ID:")]
+                  (when (seq input)
+                    (.setItem js/localStorage client-id-key input)
+                    (reset! one-drive-client-id input)
+                    input)))]
+    (if-not cid
+      (js/alert "A Client ID is required to connect to OneDrive.")
+      (let [auth-url (str "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+                          "?client_id=" cid
+                          "&response_type=token"
+                          "&redirect_uri=" (js/encodeURIComponent one-drive-redirect-uri)
+                          "&scope=" (js/encodeURIComponent "Files.ReadWrite user.read"))]
+        (set! (.-href js/window.location) auth-url)))))
 
 (defn one-drive-save [_]
-  (if @one-drive-token
+  (if-let [token @one-drive-token]
     (let [content (js/JSON.stringify (clj->js @app))
           filename "vimflowy-data.json"]
       (-> (js/fetch (str "https://graph.microsoft.com/v1.0/me/drive/root:/" filename ":/content")
                     #js{:method "PUT"
-                        :headers #js{"Authorization" (str "Bearer " @one-drive-token)
+                        :headers #js{"Authorization" (str "Bearer " token)
                                      "Content-Type" "application/json"}
                         :body content})
-          (.then (fn [r] (if (.-ok r) (js/alert "Saved to OneDrive!") (js/alert "Save failed. Token may be expired."))))
-          (.catch (fn [_] (js/alert "Network error")))))
+          (.then (fn [r]
+                   (if (.-ok r)
+                     (js/alert "Saved to OneDrive successfully!")
+                     (js/alert (str "Save failed (Status: " (.-status r) "). Token may have expired.")))))
+          (.catch (fn [e]
+                    (js/console.error e)
+                    (js/alert "Network error during OneDrive save.")))))
     (one-drive-auth)))
 
 (defn one-drive-load [_]
-  (if @one-drive-token
+  (if-let [token @one-drive-token]
     (-> (js/fetch "https://graph.microsoft.com/v1.0/me/drive/root:/vimflowy-data.json:/content"
-                  #js{:headers #js{"Authorization" (str "Bearer " @one-drive-token)}})
-        (.then (fn [r] (.json r)))
+                  #js{:headers #js{"Authorization" (str "Bearer " token)}})
+        (.then (fn [r]
+                 (if (.-ok r)
+                   (.json r)
+                   (throw (js/Error. (str "HTTP error " (.-status r)))))))
         (.then (fn [data]
-                 (let [d (js->clj data :keywordize-keys true)]
-                   (reset! app d)
+                 (let [parsed (js->clj data :keywordize-keys true)]
+                   (reset! app {:nodes (:nodes parsed)
+                                :focused (or (:focused parsed) "root")
+                                :mode (if (= (:mode parsed) "insert") :insert :normal)
+                                :help (boolean (:help parsed))
+                                :cursor-pos (or (:cursor-pos parsed) 0)})
                    (render-all!)
                    (save-local)
-                   (js/alert "Loaded from OneDrive!"))))
-        (.catch (fn [_] (js/alert "Load failed. Token may be expired."))))
+                   (js/alert "Successfully loaded from OneDrive!"))))
+        (.catch (fn [err]
+                  (js/console.error err)
+                  (js/alert "Load failed. The file may not exist yet, or your token expired."))))
     (one-drive-auth)))
 
 ;; ── Auto-save ──
@@ -1244,30 +1305,32 @@
 ;; ── Init ──
 (defonce init-done (atom false))
 (defn init! []
-  (when @init-done nil)  ;; skip if already initialized
-  (if @init-done
-    nil
-    (do
-      (reset! init-done true)
-  (create-style)
-  ;; Try loading from localStorage
-  (when-not (load-local)
-    ;; Fresh state
-    (let [root-id "root"
-          c1 (gen-id)
-          c2 (gen-id)
-          gc (gen-id)]
-      (reset! app {:nodes {root-id {:id root-id :text "Vimflowy" :parent nil :children [c1 c2] :collapsed false :completed false}
-                           c1 {:id c1 :text "Welcome to Vimflowy!" :parent root-id :children [gc] :collapsed false :completed false}
-                           c2 {:id c2 :text "Press ? for help" :parent root-id :children [] :collapsed false :completed false}
-                           gc {:id gc :text "Try j/k to navigate, o to add" :parent c1 :children [] :collapsed false :completed false}}
-                   :focused root-id
-                   :mode :normal
-                   :help false
-                   :cursor-pos 0})))
-  ;; Event listeners
-  (.addEventListener js/document "keydown" handle-key)
-  (.addEventListener js/document "click" handle-click)
-  (render-all!))))
+  (when-not @init-done
+    (reset! init-done true)
+    (create-style)
+
+    ;; 1. Intercept OAuth tokens before loading state
+    (parse-hash-token)
+
+    ;; 2. Try loading from localStorage
+    (when-not (load-local)
+      ;; Fresh state
+      (let [root-id "root"
+            c1 (gen-id)
+            c2 (gen-id)
+            gc (gen-id)]
+        (reset! app {:nodes {root-id {:id root-id :text "Vimflowy" :parent nil :children [c1 c2] :collapsed false :completed false}
+                             c1 {:id c1 :text "Welcome to Vimflowy!" :parent root-id :children [gc] :collapsed false :completed false}
+                             c2 {:id c2 :text "Press ? for help" :parent root-id :children [] :collapsed false :completed false}
+                             gc {:id gc :text "Try j/k to navigate, o to add" :parent c1 :children [] :collapsed false :completed false}}
+                     :focused root-id
+                     :mode :normal
+                     :help false
+                     :cursor-pos 0})))
+
+    ;; 3. Event listeners
+    (.addEventListener js/document "keydown" handle-key)
+    (.addEventListener js/document "click" handle-click)
+    (render-all!)))
 
 (init!)
