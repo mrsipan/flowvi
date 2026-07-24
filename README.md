@@ -1,4 +1,6 @@
-# Vimflowy Clone
+# Flowvi
+
+[Give it a try](https://mrsipan.github.io/flowvi)
 
 A tree-based outliner with vim keybindings, built in [Squint](https://github.com/squint-cljs/squint) ClojureScript. Inspired by [Vimflowy](https://github.com/WuTheFWasThat/vimflowy).
 
